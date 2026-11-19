@@ -7,6 +7,7 @@ import {
   ZoomIn,
   ZoomOut,
   Maximize2,
+  Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
@@ -28,8 +29,8 @@ import {
   SkipForward,
   ChevronLeft,
   ChevronRight,
-  Users,
-  Server,
+  Boxes,
+  Columns3,
   MessageSquarePlus,
   CheckSquare,
   FileText,
@@ -48,9 +49,10 @@ const PRESET_DIAGRAMS = {
     name: 'PlantUML: Checkout & Payment Auth',
     dialect: 'plantuml',
     description:
-      'Multi-team PlantUML architecture with box swimlanes, stereotypes, nested fragments, and @contract / @question / @decision metadata.',
+      'PlantUML showcase with box groups, stereotypes, participant/arrow/activation/fragment/note colors, return, dividers, and @contract / @question / @decision metadata.',
     code: `@startuml CheckoutAndPaymentAuth
 title Checkout & Payment Authorization Flow
+autonumber
 
 actor Customer
 
@@ -60,14 +62,16 @@ end box
 
 box "Core Commerce" #6366f1
   control "Order Service" as OrderSvc
-  database "Orders DB" as OrdersDB
+  database "Orders DB" as OrdersDB #10b981
   control "Inventory Service" as InvSvc
 end box
 
 box "Payments & Risk" #10b981
   control "Payment Service" as PaySvc
-  queue "Kafka Event Bus" as Kafka
+  queue "Kafka Event Bus" as Kafka #a855f7
 end box
+
+== Checkout & Fraud Check ==
 
 ' @contract: POST /api/v1/checkout | Auth: Bearer JWT | Idempotency-Key required
 ' @question[open]: Should edge rate-limiting enforce 10 req/min per customerId or IP?
@@ -76,16 +80,20 @@ Customer -> GW ++ : POST /api/v1/checkout
 ' @contract: gRPC OrderService.CreateOrder(cartId, paymentToken) | Timeout: 1200ms
 GW -> OrderSvc ++ : createOrder(cartId, paymentToken)
 
+OrderSvc <-> OrdersDB : verifyIdempotencyLock(cartId)
 OrderSvc -> OrdersDB ++ : INSERT order (status=PENDING)
 OrdersDB --> OrderSvc -- : orderId: "ORD-9042"
 
-opt [High-Value Order > $500]
+opt #0ea5e9 [High-Value Order > $500]
   ' @contract: Sync Risk Scoring | SLA: p99 < 180ms | Fallback: Soft-approve
   ' @decision: Run synchronous fraud check inline before card capture for orders > $500
-  OrderSvc -> PaySvc ++ : runFraudRiskCheck(customerId, amount)
+  OrderSvc -[#f59e0b]> PaySvc ++ #f59e0b : runFraudRiskCheck(customerId, amount)
+  note right of PaySvc #f59e0b : Inline check < 180ms p99
   PaySvc -> PaySvc : evaluateVelocityRules()
-  PaySvc --> OrderSvc -- : riskScore: 12 (APPROVED)
+  return riskScore: 12 (APPROVED)
 end
+
+== Payment & Stock Reservation ==
 
 ' @contract: POST /internal/v2/payments/authorize | Retry: None (non-idempotent)
 ' @question[resolved]: Which gateway handles 3DS2 challenge redirects? -> Delegated to PaySvc token vault
@@ -95,7 +103,7 @@ alt [Payment Method == Card]
   PaySvc -> OrdersDB ++ : fetchSavedCardToken(customerId)
   OrdersDB --> PaySvc -- : tok_visa_4242
   PaySvc -> PaySvc : chargeCardGateway(tok_visa_4242)
-else [Payment Method == Digital Wallet]
+else #ec4899 [Payment Method == Digital Wallet]
   PaySvc -> PaySvc : verifyApplePayCryptogram()
   PaySvc -\\ Kafka : publish("wallet.auth.audit")
 end
@@ -113,7 +121,7 @@ OrderSvc -> OrdersDB ++ : UPDATE order SET status=CONFIRMED
 OrdersDB --> OrderSvc -- : updated(1)
 
 ' @contract: Topic: order.confirmed.v1 | Schema: Avro v3 | PartitionKey: orderId
-OrderSvc -\\ Kafka : publish("order.confirmed.v1")
+OrderSvc -[#a855f7]\\ Kafka : publish("order.confirmed.v1")
 Kafka -\\ InvSvc : consume("order.confirmed.v1")
 
 OrderSvc --> GW -- : 201 Created { orderId, txId }
@@ -125,36 +133,44 @@ GW --> Customer -- : Render Order Confirmation
     name: 'Mermaid: Order Fulfillment Pipeline',
     dialect: 'mermaid',
     description:
-      'Mermaid sequenceDiagram with box domain groups, ->>+/-->>- activations, rect phase shading, par/and concurrency, and %% review tags.',
+      'Mermaid sequenceDiagram showcase with box groups, @{ "type": ... } stereotypes, create/destroy, <<->> bidirectional, rect phase shading, par/and, critical/option, and %% review tags.',
     code: `sequenceDiagram
-  autonumber
+  title Order Fulfillment Pipeline
+  autonumber 1 1
   actor Ops as Warehouse Ops
 
   box rgba(99, 102, 241, 0.14) Order & Warehouse
     participant OMS as Fulfillment Orchestrator
-    participant WMS as Warehouse WMS
-    participant Inv as Stock Ledger
+    participant WMS@{ "type": "control", "alias": "Warehouse WMS" }
+    participant Inv@{ "type": "database", "alias": "Stock Ledger" }
   end
 
   box rgba(16, 185, 129, 0.14) Logistics & Comms
-    participant Carrier as Carrier Gateway
-    participant Notify as Notification Hub
+    participant Carrier@{ "type": "boundary", "alias": "Carrier Gateway" }
+    participant Notify@{ "type": "queue", "alias": "Notification Hub" }
   end
+
+  link Carrier: Carrier API Docs @ https://carriers.example.com/v1
 
   %% @contract: Event: order.confirmed.v1 | Consumer Group: fulfillment-workers
   %% @question[open]: What is the dead-letter replay SLA if WMS is undergoing maintenance?
   OMS->>+WMS: allocateWarehouse(orderId, skuList)
   WMS->>+Inv: decrementAvailableStock(skuList)
   Inv-->>-WMS: allocationToken("ALLOC-309")
+  WMS<<->>Inv: reconcileBinLocks(skuList)
   WMS-->>-OMS: warehouseAssigned("US-EAST-2")
 
   rect rgba(56, 189, 248, 0.08)
-    Note over OMS,Carrier: Phase 2 — Parallel Label Generation & Customer Dispatch
+    Note over OMS,Carrier: Phase 2 — Parallel Label Generation & Dispatch<br/>SLA Target: < 2.5s
     par Generate Shipping Label
       %% @contract: POST /carriers/v1/labels | Timeout: 2500ms | Format: ZPL
       %% @decision: Use async fallback queue if primary carrier API exceeds 2.5s
-      OMS->>+Carrier: requestShippingLabel(orderId, weightOz)
-      Carrier-->>-OMS: trackingNumber("1Z999AA10123456784")
+      create participant LabelWorker@{ "type": "control", "alias": "Label Worker" }
+      OMS->>+LabelWorker: renderZplPayload(orderId, weightOz)
+      LabelWorker->>+Carrier: requestShippingLabel(orderId, zpl)
+      Carrier-->>-LabelWorker: trackingNumber("1Z999AA10123456784")
+      LabelWorker-->>-OMS: labelArtifact(zplUrl)
+      destroy LabelWorker
     and Send Dispatch Notice
       OMS-)Notify: emit("shipment.label.created")
       Notify-)Ops: pushPickListAlert("US-EAST-2")
@@ -162,15 +178,21 @@ GW --> Customer -- : Render Order Confirmation
   end
 
   alt International Customs Required
+    %% @question[resolved]: Which HS tariff lookup table is authoritative? -> TradeCompliance v3
     OMS->>+Carrier: submitCommercialInvoice(orderId, hsCodes)
     Carrier-->>-OMS: customsClearanceId("CUST-882")
   else Domestic Ground Shipment
     OMS->>OMS: attachStandardManifest()
   end
 
-  %% @contract: POST /wms/v1/pick-waves | Idempotent via allocationToken
-  OMS->>+WMS: releasePickWave(allocationToken, trackingNumber)
-  WMS-->>-OMS: waveQueued(waveId="W-44")
+  critical Carrier Pickup Cutoff
+    %% @contract: POST /wms/v1/pick-waves | Idempotent via allocationToken
+    OMS->>+WMS: releasePickWave(allocationToken, trackingNumber)
+    WMS-->>-OMS: waveQueued(waveId="W-44")
+  option Cutoff Window Missed
+    Carrier--xOMS: pickupWindowExpired(nextSlot="06:00")
+  end
+
   OMS-)Notify: emit("order.fulfillment.ready")`,
   },
 };
@@ -238,6 +260,71 @@ function unquote(str) {
   return trimmed;
 }
 
+function normalizeUmlColor(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^(?:rgba?|hsla?)\(/i.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^#[a-zA-Z][a-zA-Z0-9]*$/.test(trimmed)) {
+    return trimmed.slice(1);
+  }
+  return trimmed;
+}
+
+function parseHexToRgb(hex) {
+  if (!hex || typeof hex !== 'string' || !hex.startsWith('#')) return null;
+  const h = hex.slice(1);
+  if (h.length === 3 || h.length === 4) {
+    return {
+      r: parseInt(h[0] + h[0], 16),
+      g: parseInt(h[1] + h[1], 16),
+      b: parseInt(h[2] + h[2], 16),
+    };
+  }
+  if (h.length === 6 || h.length === 8) {
+    return {
+      r: parseInt(h.slice(0, 2), 16),
+      g: parseInt(h.slice(2, 4), 16),
+      b: parseInt(h.slice(4, 6), 16),
+    };
+  }
+  return null;
+}
+
+function applyAlphaToColor(color, alpha) {
+  if (!color) return null;
+  if (/^rgba\(/i.test(color) || /^hsla\(/i.test(color)) return color;
+  const rgbMatch = color.match(/^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/i);
+  if (rgbMatch) {
+    return `rgba(${rgbMatch[1]}, ${rgbMatch[2]}, ${rgbMatch[3]}, ${alpha})`;
+  }
+  const rgb = parseHexToRgb(color);
+  if (rgb) {
+    return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+  }
+  const pct = Math.round(alpha * 100);
+  return `color-mix(in srgb, ${color} ${pct}%, transparent)`;
+}
+
+function blendWithBg(color, bgHex, weight) {
+  if (!color) return bgHex;
+  const fgRgb = parseHexToRgb(color);
+  const bgRgb = parseHexToRgb(bgHex);
+  if (fgRgb && bgRgb) {
+    const r = Math.round(fgRgb.r * weight + bgRgb.r * (1 - weight));
+    const g = Math.round(fgRgb.g * weight + bgRgb.g * (1 - weight));
+    const b = Math.round(fgRgb.b * weight + bgRgb.b * (1 - weight));
+    return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+  }
+  const pct = Math.round(weight * 100);
+  return `color-mix(in srgb, ${color} ${pct}%, ${bgHex})`;
+}
+
 /**
  * Parses structured metadata tags inside single-line comments:
  *   ' @contract: ...   or   %% @contract: ...
@@ -302,7 +389,7 @@ function consumePendingMeta(pendingMeta) {
 
 function parsePlantUMLParticipantLine(line) {
   const tokens = [];
-  const tokenRegex = /"[^"]*"|<<[^>]+>>|#[0-9a-fA-F]{3,8}|\S+/g;
+  const tokenRegex = /"[^"]*"|<<[^>]+>>|#[a-zA-Z0-9]+|\S+/g;
   let m;
   while ((m = tokenRegex.exec(line)) !== null) {
     tokens.push(m[0]);
@@ -321,7 +408,7 @@ function parsePlantUMLParticipantLine(line) {
     if (t.startsWith('<<') && t.endsWith('>>')) {
       stereotype = t.slice(2, -2);
     } else if (t.startsWith('#')) {
-      color = t;
+      color = normalizeUmlColor(t);
     } else {
       coreTokens.push(t);
     }
@@ -370,13 +457,18 @@ function parsePlantUMLMessageLine(line) {
   const hasArrowHead = /[<>\\/]/.test(arrow);
   if (!hasArrowHead) return null;
 
-  const isDashed = arrow.includes('--') || /-\[[^\]]+\]-/.test(arrow);
+  const isDashed =
+    arrow.includes('--') ||
+    /-\[[^\]]+\]-/.test(arrow) ||
+    /\[[^\]]*\bdashed\b[^\]]*\]/i.test(arrow);
   const isBidirectional = arrow.startsWith('<') && arrow.endsWith('>');
   const isLeftPointing = arrow.startsWith('<') && !arrow.endsWith('>');
   const isHalfAsync = arrow.includes('\\') || arrow.includes('/') || arrow.includes('>>');
 
-  const colorMatch = arrow.match(/\[(#?[a-zA-Z0-9]+)\]/);
-  const arrowColor = colorMatch ? colorMatch[1] : null;
+  const colorMatch = arrow.match(/\[(#?[a-zA-Z0-9]+)(?:,[^\]]*)?\]/);
+  const arrowColor = colorMatch ? normalizeUmlColor(colorMatch[1]) : null;
+  const modColorMatch = modifiersRaw.match(/(#[a-zA-Z0-9]+)/);
+  const activationColor = modColorMatch ? normalizeUmlColor(modColorMatch[1]) : null;
 
   const from = isLeftPointing ? rawRight : rawLeft;
   const to = isLeftPointing ? rawLeft : rawRight;
@@ -391,6 +483,7 @@ function parsePlantUMLMessageLine(line) {
     isBidirectional,
     isHalfAsync,
     arrowColor,
+    activationColor,
     activateTarget: modifiersRaw.includes('++'),
     deactivateSource: modifiersRaw.includes('--'),
   };
@@ -481,14 +574,33 @@ function parsePlantUML(sourceText) {
     if (/^@startuml/i.test(raw) || /^@enduml/i.test(raw)) continue;
     if (/^(skinparam|hide|show|scale|newpage)\b/i.test(raw)) continue;
 
-    // Box swimlane start: box "Team Name" #Color
-    const boxMatch = raw.match(/^box\s+("[^"]+"|\S+)(?:\s+(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|[a-zA-Z]+))?$/i);
-    if (boxMatch) {
+    // Box swimlane start: box "Group Name" #Color | box Group Name #Color
+    if (/^box\b/i.test(raw)) {
+      const rest = raw.slice(3).trim();
+      let color = null;
+      let label = '';
+      if (rest) {
+        const trailingColorMatch = rest.match(
+          /^(.+?)\s+(#[a-zA-Z0-9]+|(?:rgba?|hsla?)\([^)]+\))$/i
+        );
+        if (trailingColorMatch) {
+          label = unquote(trailingColorMatch[1]);
+          color = normalizeUmlColor(trailingColorMatch[2]);
+        } else {
+          const quotedWithNamed = rest.match(/^("[^"]+")\s+([a-zA-Z]+)$/);
+          if (quotedWithNamed) {
+            label = unquote(quotedWithNamed[1]);
+            color = normalizeUmlColor(quotedWithNamed[2]);
+          } else {
+            label = unquote(rest);
+          }
+        }
+      }
       const boxId = `box_${boxes.length}`;
       const boxObj = {
         id: boxId,
-        label: unquote(boxMatch[1]),
-        color: boxMatch[2] || null,
+        label: label || `Group ${boxes.length + 1}`,
+        color,
         participantIds: [],
       };
       boxes.push(boxObj);
@@ -556,10 +668,11 @@ function parsePlantUML(sourceText) {
     }
 
     // Explicit activate / deactivate / destroy
-    const actMatch = raw.match(/^(activate|deactivate|destroy)\s+("[^"]+"|[\w.-]+)(?:\s+(#[0-9a-fA-F]{3,8}))?$/i);
+    const actMatch = raw.match(/^(activate|deactivate|destroy)\s+("[^"]+"|[\w.-]+)(?:\s+(#[a-zA-Z0-9]+))?$/i);
     if (actMatch) {
       const action = actMatch[1].toLowerCase();
       const target = unquote(actMatch[2]);
+      const color = actMatch[3] ? normalizeUmlColor(actMatch[3]) : null;
       ensureParticipant(target);
       getCurrentContainer().push({
         type: 'activation_cmd',
@@ -567,24 +680,35 @@ function parsePlantUML(sourceText) {
         lineNum,
         action,
         target,
+        color,
       });
       continue;
     }
 
     // Combined Fragments
     if (FRAGMENT_KEYWORDS.has(firstWord)) {
-      const condition = raw.slice(firstWord.length).trim();
+      let rest = raw.slice(firstWord.length).trim();
+      let fragColor = null;
+      const colorPrefix = rest.match(
+        /^(#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8}|[a-zA-Z][a-zA-Z0-9]*))(?:\s+(.*))?$/
+      );
+      if (colorPrefix) {
+        fragColor = normalizeUmlColor(colorPrefix[1]);
+        rest = (colorPrefix[2] || '').trim();
+      }
       const fragId = `${getPathPrefix()}.frag_${itemCounter++}`;
       const fragNode = {
         type: 'fragment',
         id: fragId,
         lineNum,
         keyword: firstWord,
+        color: fragColor,
         branches: [
           {
             id: `${fragId}.branch_0`,
             keyword: firstWord,
-            label: condition,
+            color: fragColor,
+            label: rest,
             children: [],
           },
         ],
@@ -600,12 +724,21 @@ function parsePlantUML(sourceText) {
         continue;
       }
       const topFrag = blockStack[blockStack.length - 1].node;
-      const condition = raw.slice(4).trim();
+      let rest = raw.slice(4).trim();
+      let branchColor = null;
+      const colorPrefix = rest.match(
+        /^(#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8}|[a-zA-Z][a-zA-Z0-9]*))(?:\s+(.*))?$/
+      );
+      if (colorPrefix) {
+        branchColor = normalizeUmlColor(colorPrefix[1]);
+        rest = (colorPrefix[2] || '').trim();
+      }
       const branchIdx = topFrag.branches.length;
       topFrag.branches.push({
         id: `${topFrag.id}.branch_${branchIdx}`,
         keyword: 'else',
-        label: condition,
+        color: branchColor,
+        label: rest,
         children: [],
       });
       continue;
@@ -622,21 +755,23 @@ function parsePlantUML(sourceText) {
 
     // Notes
     const noteMatch = raw.match(
-      /^note\s+(left\s+of|right\s+of|over)\s+("[^"]+"|[\w.-]+)(?:\s*,\s*("[^"]+"|[\w.-]+))?\s*(?::\s*(.*))?$/i
+      /^note\s+(left\s+of|right\s+of|over)\s+("[^"]+"|[\w.-]+)(?:\s*,\s*("[^"]+"|[\w.-]+))?(?:\s+(#[a-zA-Z0-9]+))?\s*(?::\s*(.*))?$/i
     );
     if (noteMatch) {
       const placement = noteMatch[1].toLowerCase().replace(/\s+/g, ' ');
       const p1 = unquote(noteMatch[2]);
       const p2 = noteMatch[3] ? unquote(noteMatch[3]) : null;
+      const noteColor = noteMatch[4] ? normalizeUmlColor(noteMatch[4]) : null;
       ensureParticipant(p1);
       if (p2) ensureParticipant(p2);
 
-      const inlineText = noteMatch[4];
+      const inlineText = noteMatch[5];
       const noteObj = {
         type: 'note',
         id: `${getPathPrefix()}.note_${itemCounter++}`,
         lineNum,
         placement,
+        color: noteColor,
         participants: p2 ? [p1, p2] : [p1],
         lines: inlineText !== undefined ? [inlineText] : [],
       };
@@ -933,7 +1068,7 @@ function parseMermaid(sourceText) {
       const boxObj = {
         id: boxId,
         label: label || `Group ${boxes.length + 1}`,
-        color,
+        color: normalizeUmlColor(color),
         participantIds: [],
       };
       boxes.push(boxObj);
@@ -1419,7 +1554,7 @@ function finalizeUnifiedAST({
 }
 
 // ============================================================================
-// 3. UNIFIED LAYOUT ENGINE (SERVICES + TEAMS ROLLUP + STEP-THROUGH + FOLDING)
+// 3. UNIFIED LAYOUT ENGINE (GROUP COLLAPSE/ROLLUP + STEP-THROUGH + FOLDING)
 // ============================================================================
 
 const LAYOUT = {
@@ -1441,10 +1576,10 @@ const LAYOUT = {
 };
 
 /**
- * Resolves effective column entities based on viewGranularity ('services' | 'teams').
- * In 'teams' mode, participants belonging to a `box` collapse into a single virtual Team column.
+ * Resolves effective column entities based on per-box `collapsedBoxIds`.
+ * Any participant whose `boxId` is in `collapsedBoxIds` rolls up into a single `group:${box.id}` column.
  */
-function buildEffectiveColumns(ast, lifelineOrder, viewGranularity) {
+function buildEffectiveColumns(ast, lifelineOrder, collapsedBoxIds) {
   const orderedParticipants = lifelineOrder
     .map((id) => ast.participantsMap.get(id))
     .filter(Boolean);
@@ -1454,49 +1589,43 @@ function buildEffectiveColumns(ast, lifelineOrder, viewGranularity) {
   });
 
   const participantToColumnId = new Map();
+  const columns = [];
+  const seenCols = new Set();
 
-  if (viewGranularity === 'teams' && ast.boxes.length > 0) {
-    const columns = [];
-    const seenCols = new Set();
-
-    for (const p of orderedParticipants) {
-      if (p.boxId && ast.boxesMap.has(p.boxId)) {
-        const box = ast.boxesMap.get(p.boxId);
-        const colId = `team:${box.id}`;
-        participantToColumnId.set(p.id, colId);
-        if (!seenCols.has(colId)) {
-          seenCols.add(colId);
-          columns.push({
-            id: colId,
-            label: box.label,
-            kind: 'team',
-            stereotype: `${box.participantIds.length} services`,
-            color: box.color,
-            boxId: box.id,
-            memberIds: [...box.participantIds],
-          });
-        }
-      } else {
-        participantToColumnId.set(p.id, p.id);
-        if (!seenCols.has(p.id)) {
-          seenCols.add(p.id);
-          columns.push({
-            ...p,
-            memberIds: [p.id],
-          });
-        }
+  for (const p of orderedParticipants) {
+    if (
+      p.boxId &&
+      ast.boxesMap.has(p.boxId) &&
+      collapsedBoxIds &&
+      collapsedBoxIds.has(p.boxId)
+    ) {
+      const box = ast.boxesMap.get(p.boxId);
+      const colId = `group:${box.id}`;
+      participantToColumnId.set(p.id, colId);
+      if (!seenCols.has(colId)) {
+        seenCols.add(colId);
+        const count = box.participantIds.length;
+        columns.push({
+          id: colId,
+          label: box.label,
+          kind: 'group',
+          stereotype: `${count} ${count === 1 ? 'member' : 'members'}`,
+          color: box.color,
+          boxId: box.id,
+          memberIds: [...box.participantIds],
+        });
+      }
+    } else {
+      participantToColumnId.set(p.id, p.id);
+      if (!seenCols.has(p.id)) {
+        seenCols.add(p.id);
+        columns.push({
+          ...p,
+          memberIds: [p.id],
+        });
       }
     }
-
-    return { columns, participantToColumnId };
   }
-
-  // 'services' granularity: every participant is its own column
-  orderedParticipants.forEach((p) => participantToColumnId.set(p.id, p.id));
-  const columns = orderedParticipants.map((p) => ({
-    ...p,
-    memberIds: [p.id],
-  }));
 
   return { columns, participantToColumnId };
 }
@@ -1532,13 +1661,13 @@ function computeSequenceLayout({
   hiddenLifelines,
   foldedCallIds,
   foldedBranchIds,
-  viewGranularity,
+  collapsedBoxIds,
   stepLimit, // null when Step-Through is off, or 0..N when Step-Through is active
 }) {
   const { columns, participantToColumnId } = buildEffectiveColumns(
     ast,
     lifelineOrder,
-    viewGranularity
+    collapsedBoxIds
   );
 
   const columnsMap = new Map(columns.map((c) => [c.id, c]));
@@ -1552,15 +1681,20 @@ function computeSequenceLayout({
     columnXMap.set(c.id, LAYOUT.LEFT_MARGIN + idx * LAYOUT.COLUMN_SPACING);
   });
 
-  // Compute contiguous Box Swimlane Spans for Services view
+  // Compute contiguous Box Swimlane Spans for both expanded and collapsed box groups
   const boxSpans = [];
-  if (viewGranularity === 'services' && ast.boxes.length > 0) {
+  if (ast.boxes.length > 0) {
     let currentSpan = null;
-    visibleColumns.forEach((col, idx) => {
+    visibleColumns.forEach((col) => {
       if (col.boxId && ast.boxesMap.has(col.boxId)) {
         const box = ast.boxesMap.get(col.boxId);
         const cx = columnXMap.get(col.id);
-        if (currentSpan && currentSpan.boxId === col.boxId) {
+        const isCollapsed = col.kind === 'group';
+        if (
+          currentSpan &&
+          currentSpan.boxId === col.boxId &&
+          currentSpan.isCollapsed === isCollapsed
+        ) {
           currentSpan.endX = cx + 82;
           currentSpan.count += 1;
         } else {
@@ -1571,7 +1705,8 @@ function computeSequenceLayout({
             color: box.color,
             startX: cx - 82,
             endX: cx + 82,
-            count: 1,
+            count: isCollapsed ? box.participantIds.length : 1,
+            isCollapsed,
           };
         }
       } else {
@@ -1604,10 +1739,10 @@ function computeSequenceLayout({
   const activationSpans = [];
   const openActivations = new Map();
 
-  const startActivation = (colId, y, callId) => {
+  const startActivation = (colId, y, callId, color = null) => {
     if (hiddenLifelines.has(colId)) return;
     const stack = openActivations.get(colId) || [];
-    stack.push({ startY: y, callId, depth: stack.length });
+    stack.push({ startY: y, callId, depth: stack.length, color: color || null });
     openActivations.set(colId, stack);
   };
 
@@ -1630,13 +1765,14 @@ function computeSequenceLayout({
         endY: Math.max(closed.startY + 18, y),
         depth: closed.depth,
         callId: closed.callId,
+        color: closed.color || null,
       });
     }
   };
 
   let cursorY = LAYOUT.TOP_START;
   let pendingHiddenCluster = null;
-  let pendingTeamInternalCluster = null;
+  let pendingGroupInternalCluster = null;
 
   const flushHiddenCluster = () => {
     if (!pendingHiddenCluster) return;
@@ -1657,23 +1793,24 @@ function computeSequenceLayout({
     pendingHiddenCluster = null;
   };
 
-  const flushTeamInternalCluster = () => {
-    if (!pendingTeamInternalCluster) return;
-    const { items, startY, teamColId, teamLabel } = pendingTeamInternalCluster;
-    const x = columnXMap.get(teamColId);
+  const flushGroupInternalCluster = () => {
+    if (!pendingGroupInternalCluster) return;
+    const { items, startY, groupColId, groupLabel, groupColor } = pendingGroupInternalCluster;
+    const x = columnXMap.get(groupColId);
     const y = startY + 20;
     renderItems.push({
-      type: 'team_internal_cluster',
-      id: `team_int_${items[0].id}`,
+      type: 'group_internal_cluster',
+      id: `group_int_${items[0].id}`,
       y,
       x,
-      teamColId,
-      teamLabel,
+      groupColId,
+      groupLabel,
+      groupColor,
       count: items.length,
       messages: items,
     });
     cursorY = startY + 42;
-    pendingTeamInternalCluster = null;
+    pendingGroupInternalCluster = null;
   };
 
   function layoutNodes(nodes, nestingDepth = 0) {
@@ -1685,7 +1822,7 @@ function computeSequenceLayout({
       if (node.type === 'activation_cmd') {
         const targetCol = participantToColumnId.get(node.target) || node.target;
         if (node.action === 'activate') {
-          startActivation(targetCol, cursorY, node.id);
+          startActivation(targetCol, cursorY, node.id, node.color || null);
         } else {
           endActivation(targetCol, cursorY);
         }
@@ -1695,7 +1832,7 @@ function computeSequenceLayout({
       if (node.type === 'divider') {
         if (stepLimit !== null && cursorY > LAYOUT.TOP_START && stepLimit === 0) continue;
         flushHiddenCluster();
-        flushTeamInternalCluster();
+        flushGroupInternalCluster();
         const y = cursorY + 20;
         renderItems.push({
           type: 'divider',
@@ -1713,7 +1850,7 @@ function computeSequenceLayout({
           .filter((colId) => !hiddenLifelines.has(colId));
         if (visibleTargets.length === 0) continue;
         flushHiddenCluster();
-        flushTeamInternalCluster();
+        flushGroupInternalCluster();
         const y = cursorY + 8;
         const xs = visibleTargets.map((colId) => columnXMap.get(colId));
         const minX = Math.min(...xs);
@@ -1723,6 +1860,7 @@ function computeSequenceLayout({
           id: node.id,
           y,
           placement: node.placement,
+          color: node.color || null,
           minX,
           maxX,
           lines: node.lines,
@@ -1734,7 +1872,7 @@ function computeSequenceLayout({
       // Non-branching Mermaid `rect` Highlight Band
       if (node.type === 'highlight_band') {
         flushHiddenCluster();
-        flushTeamInternalCluster();
+        flushGroupInternalCluster();
         const bandTopY = cursorY + 4;
         const colIds = collectNodeColumnIds(node.children, participantToColumnId);
         const visibleXs = Array.from(colIds)
@@ -1754,7 +1892,7 @@ function computeSequenceLayout({
         cursorY = bandTopY + 8;
         layoutNodes(node.children, nestingDepth);
         flushHiddenCluster();
-        flushTeamInternalCluster();
+        flushGroupInternalCluster();
         const bandBottomY = cursorY + 8;
         cursorY = bandBottomY + 6;
 
@@ -1774,7 +1912,7 @@ function computeSequenceLayout({
       // Combined Fragment (alt / opt / loop / par / break / critical / group)
       if (node.type === 'fragment') {
         flushHiddenCluster();
-        flushTeamInternalCluster();
+        flushGroupInternalCluster();
         const fragTopY = cursorY + 6;
         const fragColIds = collectNodeColumnIds(
           node.branches.flatMap((b) => b.children),
@@ -1810,6 +1948,7 @@ function computeSequenceLayout({
             branchId: branch.id,
             keyword: branch.keyword.toUpperCase(),
             label: branch.label,
+            color: branch.color || null,
             y: headerY,
             isFirst: b === 0,
             isFolded: isBranchFolded,
@@ -1824,7 +1963,7 @@ function computeSequenceLayout({
             cursorY += (b === 0 ? LAYOUT.FRAG_HEADER_H : LAYOUT.FRAG_ELSE_H) + 8;
             layoutNodes(branch.children, nestingDepth + 1);
             flushHiddenCluster();
-            flushTeamInternalCluster();
+            flushGroupInternalCluster();
             cursorY += 6;
           }
         }
@@ -1836,6 +1975,7 @@ function computeSequenceLayout({
           type: 'fragment',
           id: node.id,
           keyword: node.keyword.toUpperCase(),
+          color: node.color || null,
           leftX,
           rightX,
           topY: fragTopY,
@@ -1862,7 +2002,7 @@ function computeSequenceLayout({
 
         // CASE 1: Both endpoints hidden -> Coalesce into inline badge
         if (fromHidden && toHidden) {
-          flushTeamInternalCluster();
+          flushGroupInternalCluster();
           const fromC = columnsMap.get(fromColId);
           const toC = columnsMap.get(toColId);
           const pairName =
@@ -1887,32 +2027,32 @@ function computeSequenceLayout({
 
         flushHiddenCluster();
 
-        // CASE 2: Teams Rollup Mode where sender & receiver belong to the SAME Team box
+        // CASE 2: Collapsed Group where sender & receiver belong to the SAME collapsed box
         if (
-          viewGranularity === 'teams' &&
           fromColId === toColId &&
-          fromColId.startsWith('team:') &&
+          fromColId.startsWith('group:') &&
           node.from !== node.to
         ) {
-          const teamCol = columnsMap.get(fromColId);
+          const groupCol = columnsMap.get(fromColId);
           if (
-            pendingTeamInternalCluster &&
-            pendingTeamInternalCluster.teamColId === fromColId
+            pendingGroupInternalCluster &&
+            pendingGroupInternalCluster.groupColId === fromColId
           ) {
-            pendingTeamInternalCluster.items.push(node);
+            pendingGroupInternalCluster.items.push(node);
           } else {
-            flushTeamInternalCluster();
-            pendingTeamInternalCluster = {
+            flushGroupInternalCluster();
+            pendingGroupInternalCluster = {
               startY: cursorY,
-              teamColId: fromColId,
-              teamLabel: teamCol?.label || 'Team',
+              groupColId: fromColId,
+              groupLabel: groupCol?.label || 'Group',
+              groupColor: groupCol?.color || null,
               items: [node],
             };
           }
           continue;
         }
 
-        flushTeamInternalCluster();
+        flushGroupInternalCluster();
 
         // CASE 3: One endpoint visible, one hidden -> Compact Lifeline Stub Pill
         if (fromHidden !== toHidden) {
@@ -1942,7 +2082,7 @@ function computeSequenceLayout({
           });
 
           if (node.kind === 'call' && !isFoldedCall && fromHidden && !toHidden) {
-            startActivation(toColId, y, node.id);
+            startActivation(toColId, y, node.id, node.activationColor || null);
           } else if (node.kind === 'return' && node.pairedCallId) {
             endActivation(fromColId, y, node.pairedCallId);
           }
@@ -1999,7 +2139,7 @@ function computeSequenceLayout({
         });
 
         if (node.kind === 'call' && (node.hasFoldableChildren || node.activateTarget)) {
-          startActivation(toColId, y, node.id);
+          startActivation(toColId, y, node.id, node.activationColor || null);
         } else if (node.kind === 'return' && node.pairedCallId) {
           endActivation(fromColId, y, node.pairedCallId);
         }
@@ -2011,7 +2151,7 @@ function computeSequenceLayout({
 
   layoutNodes(ast.rootChildren, 0);
   flushHiddenCluster();
-  flushTeamInternalCluster();
+  flushGroupInternalCluster();
 
   openActivations.forEach((stack, colId) => {
     stack.forEach((item) => {
@@ -2022,6 +2162,7 @@ function computeSequenceLayout({
         endY: Math.max(item.startY + 22, cursorY + 6),
         depth: item.depth,
         callId: item.callId,
+        color: item.color || null,
       });
     });
   });
@@ -2042,13 +2183,13 @@ function computeSequenceLayout({
 }
 
 // ============================================================================
-// 4. UML STEREOTYPE & TEAM ICONS
+// 4. UML STEREOTYPE & GROUP ICONS
 // ============================================================================
 
 function StereotypeIcon({ kind, className = 'w-4 h-4' }) {
   switch (kind) {
-    case 'team':
-      return <Users className={className} />;
+    case 'group':
+      return <Boxes className={className} />;
     case 'actor':
       return (
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={className}>
@@ -2105,7 +2246,7 @@ function StereotypeIcon({ kind, className = 'w-4 h-4' }) {
 
 function getStereotypeBadgeColors(kind, isDark) {
   const map = {
-    team: isDark
+    group: isDark
       ? 'text-cyan-300 bg-cyan-500/15 border-cyan-500/35'
       : 'text-cyan-700 bg-cyan-50 border-cyan-300',
     actor: isDark
@@ -2161,10 +2302,10 @@ const COLOR_THEMES = {
     pillBg: '#18181b',
     pillBorder: '#3f3f46',
     pillText: '#f4f4f5',
-    activationFill: '#1e1b4b',
-    activationStroke: '#6366f1',
-    fragStroke: '#4f46e5',
-    fragFill: 'rgba(79, 70, 229, 0.05)',
+    activationFill: '#27272a',
+    activationStroke: '#a1a1aa',
+    fragStroke: '#6366f1',
+    fragFill: 'rgba(99, 102, 241, 0.06)',
     fragTagFill: '#312e81',
     fragTagText: '#c7d2fe',
   },
@@ -2189,8 +2330,8 @@ const COLOR_THEMES = {
     pillBg: '#ffffff',
     pillBorder: '#cbd5e1',
     pillText: '#0f172a',
-    activationFill: '#e0e7ff',
-    activationStroke: '#4f46e5',
+    activationFill: '#e2e8f0',
+    activationStroke: '#475569',
     fragStroke: '#6366f1',
     fragFill: 'rgba(99, 102, 241, 0.04)',
     fragTagFill: '#e0e7ff',
@@ -2217,8 +2358,8 @@ const COLOR_THEMES = {
     pillBg: '#0f172a',
     pillBorder: '#334155',
     pillText: '#f1f5f9',
-    activationFill: '#0c2d48',
-    activationStroke: '#38bdf8',
+    activationFill: '#1e293b',
+    activationStroke: '#94a3b8',
     fragStroke: '#0284c7',
     fragFill: 'rgba(56, 189, 248, 0.05)',
     fragTagFill: '#0c4a6e',
@@ -2245,8 +2386,8 @@ const COLOR_THEMES = {
     pillBg: '#eee8d5',
     pillBorder: '#cbbfa4',
     pillText: '#073642',
-    activationFill: '#e1ebd8',
-    activationStroke: '#2aa198',
+    activationFill: '#e8e1cc',
+    activationStroke: '#657b83',
     fragStroke: '#268bd2',
     fragFill: 'rgba(38, 139, 210, 0.05)',
     fragTagFill: '#dde9ec',
@@ -2273,8 +2414,8 @@ const COLOR_THEMES = {
     pillBg: '#071915',
     pillBorder: '#1e3a34',
     pillText: '#ecfdf5',
-    activationFill: '#064e3b',
-    activationStroke: '#10b981',
+    activationFill: '#132a24',
+    activationStroke: '#94a3b8',
     fragStroke: '#059669',
     fragFill: 'rgba(16, 185, 129, 0.05)',
     fragTagFill: '#065f46',
@@ -2298,12 +2439,11 @@ export default function App() {
   const [dialectMode, setDialectMode] = useState('auto');
 
   // Non-Destructive Exploration Overlay State
-  const [viewGranularity, setViewGranularity] = useState('services'); // 'services' | 'teams'
+  const [collapsedBoxIds, setCollapsedBoxIds] = useState(() => new Set());
   const [hiddenLifelines, setHiddenLifelines] = useState(() => new Set());
   const [foldedCallIds, setFoldedCallIds] = useState(() => new Set());
   const [foldedBranchIds, setFoldedBranchIds] = useState(() => new Set());
   const [customLifelineOrder, setCustomLifelineOrder] = useState([]);
-  const [customTeamOrder, setCustomTeamOrder] = useState([]);
 
   // Step-Through Presentation Mode State
   const [isStepMode, setIsStepMode] = useState(false);
@@ -2349,12 +2489,19 @@ export default function App() {
       : parsePlantUML(sourceCode);
   }, [sourceCode, activeDialect]);
 
-  // Reset granularity to 'services' if current diagram has no `box` groups
+  // Prune stale collapsed box IDs if source edits remove a `box` group
   useEffect(() => {
-    if (ast.boxes.length === 0 && viewGranularity === 'teams') {
-      setViewGranularity('services');
-    }
-  }, [ast.boxes.length, viewGranularity]);
+    setCollapsedBoxIds((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set();
+      prev.forEach((id) => {
+        if (ast.boxesMap.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [ast.boxesMap]);
 
   // Keep currentStep within valid bounds when source edits change message count
   useEffect(() => {
@@ -2365,44 +2512,13 @@ export default function App() {
 
   // Reconcile custom lifeline order with parsed participants
   const effectiveLifelineOrder = useMemo(() => {
-    if (viewGranularity === 'teams' && ast.boxes.length > 0) {
-      // Build default column IDs for Teams mode
-      const defaultTeamColIds = [];
-      const seen = new Set();
-      ast.participants.forEach((p) => {
-        const cid = p.boxId && ast.boxesMap.has(p.boxId) ? `team:${p.boxId}` : p.id;
-        if (!seen.has(cid)) {
-          seen.add(cid);
-          defaultTeamColIds.push(cid);
-        }
-      });
-      // Map team column order back to underlying participant order
-      const keptCols = customTeamOrder.filter((cid) => defaultTeamColIds.includes(cid));
-      const addedCols = defaultTeamColIds.filter((cid) => !keptCols.includes(cid));
-      const orderedCols = [...keptCols, ...addedCols];
-
-      const expandedParticipants = [];
-      orderedCols.forEach((cid) => {
-        if (cid.startsWith('team:')) {
-          const boxId = cid.slice(5);
-          ast.participants.forEach((p) => {
-            if (p.boxId === boxId) expandedParticipants.push(p.id);
-          });
-        } else {
-          expandedParticipants.push(cid);
-        }
-      });
-      return expandedParticipants;
-    }
-
     const parsedIds = ast.participants.map((p) => p.id);
     const kept = customLifelineOrder.filter((id) => parsedIds.includes(id));
     const added = parsedIds.filter((id) => !kept.includes(id));
     return [...kept, ...added];
-  }, [ast, customLifelineOrder, customTeamOrder, viewGranularity]);
+  }, [ast.participants, customLifelineOrder]);
 
-  const isOrderModified =
-    customLifelineOrder.length > 0 || customTeamOrder.length > 0;
+  const isOrderModified = customLifelineOrder.length > 0;
 
   // 2. Compute Sequence Layout Geometry
   const layout = useMemo(
@@ -2413,7 +2529,7 @@ export default function App() {
         hiddenLifelines,
         foldedCallIds,
         foldedBranchIds,
-        viewGranularity,
+        collapsedBoxIds,
         stepLimit: isStepMode ? currentStep : null,
       }),
     [
@@ -2422,11 +2538,27 @@ export default function App() {
       hiddenLifelines,
       foldedCallIds,
       foldedBranchIds,
-      viewGranularity,
+      collapsedBoxIds,
       isStepMode,
       currentStep,
     ]
   );
+
+  // Collect unique explicit UML arrow colors for SVG <marker> definitions
+  const customArrowColors = useMemo(() => {
+    const map = new Map();
+    let idx = 0;
+    ast.orderedSteps.forEach((step) => {
+      if (step.arrowColor && !map.has(step.arrowColor)) {
+        map.set(step.arrowColor, {
+          solidId: `arrow-solid-c-${idx}`,
+          openId: `arrow-open-c-${idx}`,
+        });
+        idx++;
+      }
+    });
+    return map;
+  }, [ast.orderedSteps]);
 
   // Resolve currently selected message node for the Right-Hand Inspector Drawer
   const selectedMessage = useMemo(() => {
@@ -2465,24 +2597,51 @@ export default function App() {
     setSelectedPreset(key);
     setSourceCode(preset.code);
     setDialectMode('auto');
-    setViewGranularity('services');
+    setCollapsedBoxIds(new Set());
     setHiddenLifelines(new Set());
     setFoldedCallIds(new Set());
     setFoldedBranchIds(new Set());
     setCustomLifelineOrder([]);
-    setCustomTeamOrder([]);
     setIsStepMode(false);
     setCurrentStep(1);
     setSelectedMessageLine(null);
     setZoom(1);
   };
 
-  // Switch between Services and Teams rollup
-  const handleSwitchGranularity = (nextMode) => {
-    if (nextMode === viewGranularity) return;
-    setViewGranularity(nextMode);
-    setHiddenLifelines(new Set()); // Clear hidden IDs since column ID namespace switches between service vs team
-  };
+  // Toggle collapse/rollup for a single `box` group
+  const toggleCollapseBox = useCallback((boxId) => {
+    setCollapsedBoxIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(boxId)) next.delete(boxId);
+      else next.add(boxId);
+      return next;
+    });
+    setHiddenLifelines((prev) => {
+      const groupColId = `group:${boxId}`;
+      if (!prev.has(groupColId)) return prev;
+      const next = new Set(prev);
+      next.delete(groupColId);
+      return next;
+    });
+  }, []);
+
+  const expandAllBoxes = useCallback(() => {
+    setCollapsedBoxIds(new Set());
+    setHiddenLifelines((prev) => {
+      let changed = false;
+      const next = new Set();
+      prev.forEach((id) => {
+        if (id.startsWith('group:')) changed = true;
+        else next.add(id);
+      });
+      return changed ? next : prev;
+    });
+  }, []);
+
+  const collapseAllBoxes = useCallback(() => {
+    setCollapsedBoxIds(new Set(ast.boxes.map((b) => b.id)));
+    setHiddenLifelines(new Set());
+  }, [ast.boxes]);
 
   // Toggle Hide/Show Lifeline
   const toggleHideLifeline = useCallback((colId) => {
@@ -2760,11 +2919,19 @@ export default function App() {
       return updatedVisible[visCursor++];
     });
 
-    if (viewGranularity === 'teams') {
-      setCustomTeamOrder(mergedOrder);
-    } else {
-      setCustomLifelineOrder(mergedOrder);
-    }
+    const expandedOrder = [];
+    mergedOrder.forEach((colId) => {
+      if (colId.startsWith('group:')) {
+        const boxId = colId.slice(6);
+        const boxMembers = effectiveLifelineOrder.filter(
+          (pid) => ast.participantsMap.get(pid)?.boxId === boxId
+        );
+        expandedOrder.push(...boxMembers);
+      } else {
+        expandedOrder.push(colId);
+      }
+    });
+    setCustomLifelineOrder(expandedOrder);
 
     setDraggedColId(null);
     setDropTargetIndex(null);
@@ -2817,12 +2984,11 @@ export default function App() {
         setSelectedPreset('custom');
         setSourceCode(ev.target.result);
         setDialectMode('auto');
-        setViewGranularity('services');
+        setCollapsedBoxIds(new Set());
         setHiddenLifelines(new Set());
         setFoldedCallIds(new Set());
         setFoldedBranchIds(new Set());
         setCustomLifelineOrder([]);
-        setCustomTeamOrder([]);
         setSelectedMessageLine(null);
         triggerToast(`Loaded ${file.name}`);
       }
@@ -2852,10 +3018,12 @@ export default function App() {
     hiddenLifelines.size +
     foldedCallIds.size +
     foldedBranchIds.size +
+    collapsedBoxIds.size +
     (isOrderModified ? 1 : 0);
 
   const hasBoxSwimlanes = ast.boxes.length > 0;
-  const headerTopHeight = hasBoxSwimlanes && viewGranularity === 'services' ? 114 : 88;
+  const hasVisibleBoxBanners = layout.boxSpans.length > 0;
+  const headerTopHeight = hasVisibleBoxBanners ? 114 : 88;
 
   return (
     <div className={`flex flex-col h-screen w-full overflow-hidden select-none ${theme.bgApp}`}>
@@ -3193,7 +3361,7 @@ export default function App() {
             }`}
           >
             <div className="flex flex-wrap items-center gap-2">
-              {/* Services vs. Teams Semantic Rollup Toggle (when `box` groups exist) */}
+              {/* Group Collapse / Expand Toggle (when `box` groups exist) */}
               {hasBoxSwimlanes && (
                 <div
                   className={`flex items-center p-0.5 rounded-lg border text-[11px] font-medium ${
@@ -3201,32 +3369,32 @@ export default function App() {
                   }`}
                 >
                   <button
-                    onClick={() => handleSwitchGranularity('services')}
-                    title="Show individual service lifelines under team swimlane banners"
+                    onClick={expandAllBoxes}
+                    title="Expand all group boxes to show individual lifelines"
                     className={`flex items-center gap-1 px-2 py-1 rounded-md transition cursor-pointer ${
-                      viewGranularity === 'services'
+                      collapsedBoxIds.size === 0
                         ? 'bg-indigo-600 text-white shadow-xs'
                         : isDark
                         ? 'text-zinc-400 hover:text-zinc-200'
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    <Server className="w-3 h-3" />
-                    <span>Services</span>
+                    <Columns3 className="w-3 h-3" />
+                    <span>Detailed</span>
                   </button>
                   <button
-                    onClick={() => handleSwitchGranularity('teams')}
-                    title="Aggregate each box swimlane into a single Team column"
+                    onClick={collapseAllBoxes}
+                    title="Roll up every group box into a summary column (or click any group banner to collapse individually)"
                     className={`flex items-center gap-1 px-2 py-1 rounded-md transition cursor-pointer ${
-                      viewGranularity === 'teams'
+                      collapsedBoxIds.size === ast.boxes.length
                         ? 'bg-cyan-600 text-white shadow-xs'
                         : isDark
                         ? 'text-zinc-400 hover:text-zinc-200'
                         : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    <Users className="w-3 h-3" />
-                    <span>Teams</span>
+                    <Boxes className="w-3 h-3" />
+                    <span>Grouped</span>
                   </button>
                 </div>
               )}
@@ -3282,11 +3450,11 @@ export default function App() {
               {activeFiltersCount > 0 && (
                 <button
                   onClick={() => {
+                    setCollapsedBoxIds(new Set());
                     setHiddenLifelines(new Set());
                     setFoldedCallIds(new Set());
                     setFoldedBranchIds(new Set());
                     setCustomLifelineOrder([]);
-                    setCustomTeamOrder([]);
                   }}
                   className="flex items-center gap-1 text-[11px] font-medium px-2 py-1 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 transition cursor-pointer"
                 >
@@ -3444,7 +3612,7 @@ export default function App() {
                 <EyeOff className="w-10 h-10 text-zinc-500 mb-3" />
                 <p className="text-sm font-semibold mb-1">All columns are currently hidden</p>
                 <p className={`text-xs mb-4 ${theme.textMuted}`}>
-                  Restore one or more lifelines or teams to continue exploring.
+                  Restore one or more hidden columns to continue exploring.
                 </p>
                 <button
                   onClick={() => setHiddenLifelines(new Set())}
@@ -3469,7 +3637,7 @@ export default function App() {
                   }}
                 >
                   {/* ======================================================== */}
-                  {/* STICKY HEADER: TEAM BOX BANNERS + DRAGGABLE COLUMNS      */}
+                  {/* STICKY HEADER: GROUP BOX BANNERS + DRAGGABLE COLUMNS     */}
                   {/* ======================================================== */}
                   <div
                     className={`sticky top-0 z-20 pt-2.5 pb-2 border-b backdrop-blur-md transition-colors ${
@@ -3487,39 +3655,83 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Contiguous Box Swimlane Banners (Services View) */}
-                    {viewGranularity === 'services' && layout.boxSpans.length > 0 && (
+                    {/* Contiguous Box Swimlane Banners (stay anchored above both expanded & collapsed groups) */}
+                    {hasVisibleBoxBanners && (
                       <div className="relative w-full h-6 mb-1">
-                        {layout.boxSpans.map((span, idx) => (
-                          <div
-                            key={`${span.boxId}_${idx}`}
-                            style={{
-                              left: span.startX,
-                              width: Math.max(120, span.endX - span.startX),
-                              borderColor: span.color || '#6366f1',
-                              backgroundColor: isDark
-                                ? 'rgba(99, 102, 241, 0.12)'
-                                : 'rgba(99, 102, 241, 0.08)',
-                            }}
-                            className="absolute top-0 h-5 rounded-md border px-2 flex items-center justify-center text-[10px] font-bold tracking-wide truncate"
-                          >
-                            <span
-                              className="w-2 h-2 rounded-full mr-1.5 shrink-0"
-                              style={{ backgroundColor: span.color || '#6366f1' }}
-                            />
-                            <span className="truncate">{span.label}</span>
-                          </div>
-                        ))}
+                        {layout.boxSpans.map((span, idx) => {
+                          const boxColor = span.color || '#6366f1';
+                          return (
+                            <button
+                              type="button"
+                              key={`${span.boxId}_${idx}`}
+                              onClick={() => toggleCollapseBox(span.boxId)}
+                              title={
+                                span.isCollapsed
+                                  ? `Expand "${span.label}" (${span.count} ${
+                                      span.count === 1 ? 'member' : 'members'
+                                    })`
+                                  : `Collapse "${span.label}" into a single summary column`
+                              }
+                              style={{
+                                left: span.startX,
+                                width: Math.max(120, span.endX - span.startX),
+                                borderColor: boxColor,
+                                backgroundColor: applyAlphaToColor(
+                                  boxColor,
+                                  span.isCollapsed
+                                    ? isDark
+                                      ? 0.24
+                                      : 0.16
+                                    : isDark
+                                    ? 0.16
+                                    : 0.11
+                                ),
+                              }}
+                              className={`group/banner absolute top-0 h-5 rounded-md border px-2 flex items-center justify-between gap-1 text-[10px] font-bold tracking-wide truncate cursor-pointer hover:brightness-110 transition ${
+                                span.isCollapsed ? 'border-dashed' : ''
+                              }`}
+                            >
+                              <span className="flex items-center min-w-0">
+                                <span
+                                  className="w-2 h-2 rounded-full mr-1.5 shrink-0"
+                                  style={{ backgroundColor: boxColor }}
+                                />
+                                <span className="truncate">{span.label}</span>
+                              </span>
+                              {span.isCollapsed ? (
+                                <Maximize2 className="w-3 h-3 shrink-0 opacity-75 group-hover/banner:opacity-100 transition" />
+                              ) : (
+                                <Minimize2 className="w-3 h-3 shrink-0 opacity-55 group-hover/banner:opacity-100 transition" />
+                              )}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
 
-                    {/* Draggable Participant / Team Column Cards */}
+                    {/* Draggable Participant / Collapsed Group Column Cards */}
                     <div className="relative w-full h-14">
                       {layout.visibleColumns.map((col, visIdx) => {
                         const centerX = layout.columnXMap.get(col.id);
                         const cardWidth = 160;
                         const isDragging = draggedColId === col.id;
                         const isHighlighted = activeColIds?.has(col.id);
+                        const hasExplicitColor = Boolean(col.color) && !isHighlighted && !isDragging;
+                        const customCardStyle = hasExplicitColor
+                          ? {
+                              left: centerX - cardWidth / 2,
+                              width: cardWidth,
+                              borderColor: col.color,
+                              backgroundColor: blendWithBg(
+                                col.color,
+                                isDark ? '#18181b' : '#ffffff',
+                                isDark ? 0.16 : 0.1
+                              ),
+                            }
+                          : {
+                              left: centerX - cardWidth / 2,
+                              width: cardWidth,
+                            };
 
                         return (
                           <React.Fragment key={col.id}>
@@ -3536,18 +3748,17 @@ export default function App() {
                               onDragOver={(e) => handleHeaderDragOver(e, visIdx)}
                               onDrop={handleHeaderDrop}
                               onDragEnd={handleHeaderDragEnd}
-                              style={{
-                                left: centerX - cardWidth / 2,
-                                width: cardWidth,
-                              }}
-                              className={`group absolute top-0 h-13 rounded-xl border px-2.5 py-1.5 flex items-center justify-between gap-1.5 shadow-sm transition-all cursor-grab active:cursor-grabbing ${
+                              style={customCardStyle}
+                              className={`group absolute top-0 h-13 rounded-xl border px-2.5 py-1.5 flex items-center justify-between gap-1 shadow-sm transition-all cursor-grab active:cursor-grabbing ${
                                 isDragging
                                   ? 'opacity-45 scale-95 border-cyan-400'
                                   : isHighlighted
                                   ? isDark
                                     ? 'bg-indigo-950/80 border-indigo-400 ring-2 ring-indigo-500/30'
                                     : 'bg-indigo-50 border-indigo-500 ring-2 ring-indigo-500/20'
-                                  : col.kind === 'team'
+                                  : hasExplicitColor
+                                  ? ''
+                                  : col.kind === 'group'
                                   ? isDark
                                     ? 'bg-cyan-950/45 border-cyan-500/50 hover:border-cyan-400'
                                     : 'bg-cyan-50/80 border-cyan-400 hover:border-cyan-500'
@@ -3561,10 +3772,21 @@ export default function App() {
                                   className={`w-3.5 h-3.5 shrink-0 opacity-40 group-hover:opacity-90 transition ${theme.textMuted}`}
                                 />
                                 <div
-                                  className={`p-1 rounded-lg border shrink-0 ${getStereotypeBadgeColors(
-                                    col.kind,
-                                    isDark
-                                  )}`}
+                                  style={
+                                    col.color
+                                      ? {
+                                          borderColor: col.color,
+                                          backgroundColor: applyAlphaToColor(
+                                            col.color,
+                                            isDark ? 0.2 : 0.14
+                                          ),
+                                          color: col.color,
+                                        }
+                                      : undefined
+                                  }
+                                  className={`p-1 rounded-lg border shrink-0 ${
+                                    col.color ? '' : getStereotypeBadgeColors(col.kind, isDark)
+                                  }`}
                                 >
                                   <StereotypeIcon kind={col.kind} className="w-3.5 h-3.5" />
                                 </div>
@@ -3580,21 +3802,40 @@ export default function App() {
                                 </div>
                               </div>
 
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleHideLifeline(col.id);
-                                }}
-                                title={`Hide ${col.label}`}
-                                className={`p-1 rounded-md opacity-55 group-hover:opacity-100 transition cursor-pointer shrink-0 ${
-                                  isDark
-                                    ? 'hover:bg-zinc-800 text-zinc-400 hover:text-amber-300'
-                                    : 'hover:bg-slate-100 text-slate-500 hover:text-amber-600'
-                                }`}
-                              >
-                                <EyeOff className="w-3.5 h-3.5" />
-                              </button>
+                              <div className="flex items-center shrink-0">
+                                {col.kind === 'group' && col.boxId && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      toggleCollapseBox(col.boxId);
+                                    }}
+                                    title={`Expand "${col.label}" group`}
+                                    className={`p-1 rounded-md opacity-70 group-hover:opacity-100 transition cursor-pointer shrink-0 ${
+                                      isDark
+                                        ? 'hover:bg-zinc-800 text-cyan-300 hover:text-cyan-200'
+                                        : 'hover:bg-slate-100 text-cyan-700 hover:text-cyan-900'
+                                    }`}
+                                  >
+                                    <Maximize2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    toggleHideLifeline(col.id);
+                                  }}
+                                  title={`Hide ${col.label}`}
+                                  className={`p-1 rounded-md opacity-55 group-hover:opacity-100 transition cursor-pointer shrink-0 ${
+                                    isDark
+                                      ? 'hover:bg-zinc-800 text-zinc-400 hover:text-amber-300'
+                                      : 'hover:bg-slate-100 text-slate-500 hover:text-amber-600'
+                                  }`}
+                                >
+                                  <EyeOff className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
 
                             {draggedColId &&
@@ -3681,6 +3922,39 @@ export default function App() {
                           strokeLinejoin="round"
                         />
                       </marker>
+                      {Array.from(customArrowColors.entries()).map(([colorVal, ids]) => (
+                        <React.Fragment key={ids.solidId}>
+                          <marker
+                            id={ids.solidId}
+                            viewBox="0 0 10 10"
+                            refX="10"
+                            refY="5"
+                            markerWidth="7"
+                            markerHeight="7"
+                            orient="auto-start-reverse"
+                          >
+                            <path d="M 0 1.5 L 10 5 L 0 8.5 z" fill={colorVal} />
+                          </marker>
+                          <marker
+                            id={ids.openId}
+                            viewBox="0 0 10 10"
+                            refX="9.5"
+                            refY="5"
+                            markerWidth="7"
+                            markerHeight="7"
+                            orient="auto-start-reverse"
+                          >
+                            <path
+                              d="M 1 1.5 L 9 5 L 1 8.5"
+                              fill="none"
+                              stroke={colorVal}
+                              strokeWidth="1.8"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </marker>
+                        </React.Fragment>
+                      ))}
                     </defs>
 
                     <rect x="0" y="0" width={layout.canvasWidth} height={layout.totalHeight} fill={theme.svgBg} />
@@ -3709,6 +3983,9 @@ export default function App() {
                       .map((frag) => {
                         const width = Math.max(140, frag.rightX - frag.leftX);
                         const height = Math.max(36, frag.bottomY - frag.topY);
+                        const fragBackdropFill = frag.color
+                          ? applyAlphaToColor(frag.color, 0.08)
+                          : theme.fragFill;
 
                         return (
                           <rect
@@ -3718,7 +3995,7 @@ export default function App() {
                             width={width}
                             height={height}
                             rx="8"
-                            fill={theme.fragFill}
+                            fill={fragBackdropFill}
                             stroke="none"
                           />
                         );
@@ -3728,6 +4005,15 @@ export default function App() {
                     {layout.visibleColumns.map((col) => {
                       const x = layout.columnXMap.get(col.id);
                       const isHighlighted = activeColIds?.has(col.id);
+                      const lifelineColor = isHighlighted
+                        ? '#6366f1'
+                        : col.color
+                        ? applyAlphaToColor(col.color, isDark ? 0.55 : 0.65)
+                        : col.kind === 'group'
+                        ? isDark
+                          ? '#0e7490'
+                          : '#06b6d4'
+                        : theme.lifelineStroke;
                       return (
                         <line
                           key={`lifeline_${col.id}`}
@@ -3735,16 +4021,8 @@ export default function App() {
                           y1={0}
                           x2={x}
                           y2={layout.totalHeight - 12}
-                          stroke={
-                            isHighlighted
-                              ? '#6366f1'
-                              : col.kind === 'team'
-                              ? isDark
-                                ? '#0e7490'
-                                : '#06b6d4'
-                              : theme.lifelineStroke
-                          }
-                          strokeWidth={isHighlighted || col.kind === 'team' ? '2.2' : '1.5'}
+                          stroke={lifelineColor}
+                          strokeWidth={isHighlighted || col.kind === 'group' ? '2.2' : '1.5'}
                           strokeDasharray="6 5"
                         />
                       );
@@ -3758,6 +4036,12 @@ export default function App() {
                       const barH = Math.max(18, act.endY - act.startY);
                       const callNode = ast.allNodesById.get(act.callId);
                       const canFold = callNode && callNode.kind === 'call' && callNode.hasFoldableChildren;
+                      const colColor = layout.columnsMap.get(act.colId)?.color || null;
+                      const explicitColor = act.color || colColor;
+                      const actFill = explicitColor
+                        ? blendWithBg(explicitColor, theme.svgBg, isDark ? 0.28 : 0.2)
+                        : theme.activationFill;
+                      const actStroke = explicitColor || theme.activationStroke;
 
                       return (
                         <g
@@ -3774,8 +4058,8 @@ export default function App() {
                             width={barW}
                             height={barH}
                             rx="3"
-                            fill={theme.activationFill}
-                            stroke={theme.activationStroke}
+                            fill={actFill}
+                            stroke={actStroke}
                             strokeWidth="1.5"
                           />
                         </g>
@@ -3788,6 +4072,7 @@ export default function App() {
                       .map((frag) => {
                         const width = Math.max(140, frag.rightX - frag.leftX);
                         const height = Math.max(36, frag.bottomY - frag.topY);
+                        const frameStroke = frag.color || theme.fragStroke;
                         return (
                           <g key={`hdr_${frag.id}`}>
                             <rect
@@ -3797,7 +4082,7 @@ export default function App() {
                               height={height}
                               rx="8"
                               fill="none"
-                              stroke={theme.fragStroke}
+                              stroke={frameStroke}
                               strokeWidth="1.4"
                             />
                             {frag.branchHeaders.map((bh) => {
@@ -3809,6 +4094,12 @@ export default function App() {
                                 condText.length > maxCondChars
                                   ? `${condText.slice(0, maxCondChars - 1)}…`
                                   : condText;
+                              const branchColor = bh.color || frag.color;
+                              const tagFill = branchColor
+                                ? blendWithBg(branchColor, theme.svgBg, isDark ? 0.35 : 0.22)
+                                : theme.fragTagFill;
+                              const tagStroke = branchColor || theme.fragStroke;
+                              const tagTextFill = branchColor ? theme.pillText : theme.fragTagText;
 
                               return (
                                 <g key={bh.branchId}>
@@ -3818,7 +4109,7 @@ export default function App() {
                                       y1={bh.y}
                                       x2={frag.rightX}
                                       y2={bh.y}
-                                      stroke={theme.fragStroke}
+                                      stroke={tagStroke}
                                       strokeWidth="1.2"
                                       strokeDasharray="5 4"
                                     />
@@ -3836,14 +4127,14 @@ export default function App() {
                                       d={`M ${frag.leftX} ${bh.y} H ${frag.leftX + tagW} L ${
                                         frag.leftX + tagW + 8
                                       } ${bh.y + 11} L ${frag.leftX + tagW} ${bh.y + 22} H ${frag.leftX} Z`}
-                                      fill={theme.fragTagFill}
-                                      stroke={theme.fragStroke}
+                                      fill={tagFill}
+                                      stroke={tagStroke}
                                       strokeWidth="1"
                                     />
                                     <text
                                       x={frag.leftX + 8}
                                       y={bh.y + 15}
-                                      fill={theme.fragTagText}
+                                      fill={tagTextFill}
                                       fontSize="11"
                                       fontFamily="monospace"
                                       fontWeight="700"
@@ -3853,7 +4144,7 @@ export default function App() {
                                     <text
                                       x={frag.leftX + 20}
                                       y={bh.y + 15}
-                                      fill={theme.fragTagText}
+                                      fill={tagTextFill}
                                       fontSize="10"
                                       fontFamily="monospace"
                                       fontWeight="700"
@@ -3865,7 +4156,7 @@ export default function App() {
                                       <text
                                         x={frag.leftX + tagW + 14}
                                         y={bh.y + 15}
-                                        fill={isDark ? '#c7d2fe' : '#312e81'}
+                                        fill={tagTextFill}
                                         fontSize="10.5"
                                         fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                                         fontWeight="600"
@@ -3882,8 +4173,8 @@ export default function App() {
                                           width={Math.max(120, width - 28)}
                                           height="22"
                                           rx="6"
-                                          fill={isDark ? '#1e1b4b' : '#eef2ff'}
-                                          stroke={theme.fragStroke}
+                                          fill={blendWithBg(tagStroke, theme.svgBg, isDark ? 0.2 : 0.12)}
+                                          stroke={tagStroke}
                                           strokeDasharray="3 3"
                                           strokeWidth="1"
                                         />
@@ -3891,7 +4182,7 @@ export default function App() {
                                           x={frag.leftX + width / 2}
                                           y={bh.y + 41}
                                           textAnchor="middle"
-                                          fill={isDark ? '#a5b4fc' : '#4338ca'}
+                                          fill={tagTextFill}
                                           fontSize="10.5"
                                           fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                                         >
@@ -3908,7 +4199,7 @@ export default function App() {
                         );
                       })}
 
-                    {/* 5. LAYER: MESSAGES, NOTES, DIVIDERS, FOLDED CALLS, TEAM & HIDDEN BADGES */}
+                    {/* 5. LAYER: MESSAGES, NOTES, DIVIDERS, FOLDED CALLS, GROUP & HIDDEN BADGES */}
                     {(() => {
                       const getColumnEdgeX = (colId, centerX, y, side) => {
                         const matching = layout.activationSpans.filter(
@@ -3977,6 +4268,17 @@ export default function App() {
                         else if (item.placement === 'left of') noteX = item.minX - noteW - 16;
                         else noteX = (item.minX + item.maxX) / 2 - noteW / 2;
                         noteX = Math.max(16, Math.min(layout.canvasWidth - noteW - 16, noteX));
+                        const noteFill = item.color
+                          ? blendWithBg(item.color, theme.svgBg, isDark ? 0.25 : 0.2)
+                          : isDark
+                          ? '#272012'
+                          : '#fef9c3';
+                        const noteStroke = item.color || (isDark ? '#b45309' : '#eab308');
+                        const noteTextFill = item.color
+                          ? theme.pillText
+                          : isDark
+                          ? '#fde68a'
+                          : '#713f12';
 
                         return (
                           <g key={item.id}>
@@ -3986,8 +4288,8 @@ export default function App() {
                               width={noteW}
                               height={noteH}
                               rx="5"
-                              fill={isDark ? '#272012' : '#fef9c3'}
-                              stroke={isDark ? '#b45309' : '#eab308'}
+                              fill={noteFill}
+                              stroke={noteStroke}
                               strokeWidth="1.2"
                             />
                             {item.lines.map((lineText, lIdx) => (
@@ -3995,7 +4297,7 @@ export default function App() {
                                 key={lIdx}
                                 x={noteX + 10}
                                 y={item.y + 16 + lIdx * 15}
-                                fill={isDark ? '#fde68a' : '#713f12'}
+                                fill={noteTextFill}
                                 fontSize="10.5"
                                 fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                               >
@@ -4006,14 +4308,25 @@ export default function App() {
                         );
                       }
 
-                      // 5c. Teams Rollup Intra-Team Collapsed Badge
-                      if (item.type === 'team_internal_cluster') {
+                      // 5c. Collapsed Group Internal Interaction Badge
+                      if (item.type === 'group_internal_cluster') {
                         const label =
                           item.count === 1
                             ? `⚙ ${item.messages[0].label || 'internal call'}`
-                            : `⚙ ${item.count} intra-team interactions`;
+                            : `⚙ ${item.count} internal interactions`;
                         const clipped = label.length > 32 ? `${label.slice(0, 31)}…` : label;
                         const pillW = Math.min(220, Math.max(120, clipped.length * 6.4 + 24));
+                        const badgeFill = item.groupColor
+                          ? blendWithBg(item.groupColor, theme.svgBg, isDark ? 0.24 : 0.14)
+                          : isDark
+                          ? '#083344'
+                          : '#ecfeff';
+                        const badgeStroke = item.groupColor || (isDark ? '#06b6d4' : '#0891b2');
+                        const badgeText = item.groupColor
+                          ? theme.pillText
+                          : isDark
+                          ? '#67e8f9'
+                          : '#155e75';
 
                         return (
                           <g
@@ -4021,7 +4334,7 @@ export default function App() {
                             onClick={() => handleSelectMessage(item.messages[0])}
                             onMouseEnter={() =>
                               setHoveredItem({
-                                tooltip: `${item.teamLabel}: ${item.count} internal service call(s) collapsed in Teams view (Click to inspect)`,
+                                tooltip: `${item.groupLabel}: ${item.count} internal interaction(s) rolled up (Click to inspect)`,
                               })
                             }
                             onMouseLeave={() => setHoveredItem(null)}
@@ -4033,8 +4346,8 @@ export default function App() {
                               width={pillW}
                               height="24"
                               rx="12"
-                              fill={isDark ? '#083344' : '#ecfeff'}
-                              stroke={isDark ? '#06b6d4' : '#0891b2'}
+                              fill={badgeFill}
+                              stroke={badgeStroke}
                               strokeDasharray="3 2"
                               strokeWidth="1.2"
                             />
@@ -4042,7 +4355,7 @@ export default function App() {
                               x={item.x}
                               y={item.y + 4}
                               textAnchor="middle"
-                              fill={isDark ? '#67e8f9' : '#155e75'}
+                              fill={badgeText}
                               fontSize="10.5"
                               fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                               fontWeight="600"
@@ -4134,7 +4447,7 @@ export default function App() {
                               y1={item.y}
                               x2={lineX2}
                               y2={item.y}
-                              stroke={isDark ? '#71717a' : '#94a3b8'}
+                              stroke={item.node.arrowColor || (isDark ? '#71717a' : '#94a3b8')}
                               strokeWidth="1.3"
                               strokeDasharray={item.node.isDashed ? '3 2' : undefined}
                             />
@@ -4230,6 +4543,17 @@ export default function App() {
                         const edgeX = getColumnEdgeX(colId, x, y, 'right');
                         const labelText = node.label || 'self()';
                         const clipped = labelText.length > 26 ? `${labelText.slice(0, 25)}…` : labelText;
+                        const customMarkers = node.arrowColor
+                          ? customArrowColors.get(node.arrowColor)
+                          : null;
+                        const selfStroke = isSelected
+                          ? '#38bdf8'
+                          : node.arrowColor || theme.arrowSolid;
+                        const selfMarker = isSelected
+                          ? 'url(#arrow-selected)'
+                          : customMarkers
+                          ? `url(#${node.isHalfAsync ? customMarkers.openId : customMarkers.solidId})`
+                          : 'url(#arrow-solid)';
 
                         return (
                           <g
@@ -4246,10 +4570,10 @@ export default function App() {
                             <path
                               d={`M ${edgeX} ${y - 8} H ${edgeX + loopW} V ${y + loopH - 8} H ${edgeX + 2}`}
                               fill="none"
-                              stroke={isSelected ? '#38bdf8' : theme.arrowSolid}
+                              stroke={selfStroke}
                               strokeWidth={isSelected ? '2.2' : '1.6'}
                               strokeDasharray={node.isDashed ? '5 4' : undefined}
-                              markerEnd={isSelected ? 'url(#arrow-selected)' : 'url(#arrow-solid)'}
+                              markerEnd={selfMarker}
                             />
                             <text
                               x={edgeX + loopW + 8}
@@ -4282,8 +4606,13 @@ export default function App() {
                         const decisionCount = node.metadata?.decisions?.length || 0;
                         const hasMetaBadge = hasContract || openQCount > 0 || decisionCount > 0;
 
+                        const customMarkers = node.arrowColor
+                          ? customArrowColors.get(node.arrowColor)
+                          : null;
                         const strokeColor = isSelected
                           ? '#38bdf8'
+                          : node.arrowColor
+                          ? node.arrowColor
                           : isReturn
                           ? theme.arrowReturn
                           : isAsync
@@ -4291,6 +4620,8 @@ export default function App() {
                           : theme.arrowSolid;
                         const markerId = isSelected
                           ? 'url(#arrow-selected)'
+                          : customMarkers
+                          ? `url(#${isReturn || isAsync ? customMarkers.openId : customMarkers.solidId})`
                           : isReturn
                           ? 'url(#arrow-return)'
                           : isAsync
