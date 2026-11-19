@@ -4,7 +4,7 @@ import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
-  base: '/',
+  base: process.env.GITHUB_ACTIONS === 'true' ? '/umlens/' : '/',
   server: {
     host: '0.0.0.0',
     port: 3000,

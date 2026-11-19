@@ -36,6 +36,7 @@ import {
   Scale,
   Plus,
   Check,
+  Palette,
 } from 'lucide-react';
 
 // ============================================================================
@@ -214,13 +215,15 @@ function detectDialect(sourceText) {
     if (/^sequenceDiagram\b/i.test(line)) mermaidScore += 10;
     if (/^%%/.test(line)) mermaidScore += 3;
     if (/^rect\s+(rgb|rgba|#)/i.test(line)) mermaidScore += 4;
-    if (/(->>\+|-->>-|-\)|--\))/.test(line)) mermaidScore += 3;
+    if (/(->>\+|-->>-|-\)|--\)|<<-->>|<<->>)/.test(line)) mermaidScore += 3;
+    if (/@\{[^}]*\}/.test(line) || /^create\s+(participant|actor)\b/i.test(line)) mermaidScore += 4;
 
     if (/^@startuml\b/i.test(line)) pumlScore += 10;
     if (/^'/.test(line)) pumlScore += 3;
     if (/^(boundary|control|database|collections|queue|entity)\s+/i.test(line)) pumlScore += 4;
     if (/\s(\+\+|--)\s*(:|$)/.test(line)) pumlScore += 3;
     if (/^end\s+box\b/i.test(line)) pumlScore += 4;
+    if (/^return(?:\s+|$)/i.test(line)) pumlScore += 3;
   }
 
   return mermaidScore > pumlScore ? 'mermaid' : 'plantuml';
@@ -353,7 +356,7 @@ function parsePlantUMLParticipantLine(line) {
 
 function parsePlantUMLMessageLine(line) {
   const msgRegex =
-    /^("[^"]+"|[\w.-]+)\s*((?:<<|<|\\|\/|x|o)?-(?:\[[^\]]+\])?-?(?:>>|>|\\|\/|x|o)?)\s*("[^"]+"|[\w.-]+)\s*((?:\+\+|--|\*\*|!!|\s|#[\w]+)*)(?::\s*(.*))?$/;
+    /^("[^"]+"|[\w.]+(?:-[\w.]+)*)\s*((?:<<|<|\\|\/|x|o)?-(?:\[[^\]]+\])?-?(?:>>|>|\\|\/|x|o)?)\s*("[^"]+"|[\w.]+(?:-[\w.]+)*)\s*((?:\+\+|--|\*\*|!!|\s|#[\w]+)*)(?::\s*(.*))?$/;
 
   const match = line.match(msgRegex);
   if (!match) return null;
@@ -368,6 +371,7 @@ function parsePlantUMLMessageLine(line) {
   if (!hasArrowHead) return null;
 
   const isDashed = arrow.includes('--') || /-\[[^\]]+\]-/.test(arrow);
+  const isBidirectional = arrow.startsWith('<') && arrow.endsWith('>');
   const isLeftPointing = arrow.startsWith('<') && !arrow.endsWith('>');
   const isHalfAsync = arrow.includes('\\') || arrow.includes('/') || arrow.includes('>>');
 
@@ -384,6 +388,7 @@ function parsePlantUMLMessageLine(line) {
     label,
     isDashed,
     isLeftPointing,
+    isBidirectional,
     isHalfAsync,
     arrowColor,
     activateTarget: modifiersRaw.includes('++'),
@@ -644,6 +649,21 @@ function parsePlantUML(sourceText) {
       continue;
     }
 
+    // PlantUML `return [label]` (pops active frame and emits return arrow to caller)
+    const returnMatch = raw.match(/^return(?:\s+(.*))?$/i);
+    if (returnMatch) {
+      const metadata = consumePendingMeta(pendingMeta);
+      getCurrentContainer().push({
+        type: 'return_cmd',
+        id: `${getPathPrefix()}.msg_${itemCounter++}`,
+        lineNum,
+        label: (returnMatch[1] || '').trim(),
+        autoNumber: autoNumberEnabled ? autoNumberCounter++ : null,
+        metadata,
+      });
+      continue;
+    }
+
     // Message line
     const parsedMsg = parsePlantUMLMessageLine(raw);
     if (parsedMsg) {
@@ -682,14 +702,58 @@ function parsePlantUML(sourceText) {
 // 2B. MERMAID SEQUENCE PARSER -> UNIFIED AST
 // ----------------------------------------------------------------------------
 
+const MERMAID_PARTICIPANT_TYPES = new Set([
+  'participant',
+  'actor',
+  'boundary',
+  'control',
+  'entity',
+  'database',
+  'collections',
+  'queue',
+]);
+
 function parseMermaidParticipantLine(line) {
   // participant OMS as Fulfillment Orchestrator
   // actor Ops as "Warehouse Ops"
-  const match = line.match(/^(participant|actor)\s+("[^"]+"|[\w.-]+)(?:\s+as\s+(.+))?$/i);
+  // participant DB@{ "type": "database", "alias": "Orders DB" }
+  let working = line.trim();
+  let metaObj = null;
+
+  const metaMatch = working.match(/@\{([\s\S]*)\}\s*$/);
+  if (metaMatch) {
+    working = working.slice(0, metaMatch.index).trim();
+    try {
+      metaObj = JSON.parse(`{${metaMatch[1]}}`);
+    } catch {
+      const typeM = metaMatch[1].match(/type\s*:\s*["']?([a-zA-Z]+)["']?/i);
+      const aliasM = metaMatch[1].match(/alias\s*:\s*["']([^"']+)["']/i);
+      metaObj = {
+        ...(typeM ? { type: typeM[1] } : {}),
+        ...(aliasM ? { alias: aliasM[1] } : {}),
+      };
+    }
+  }
+
+  const match = working.match(/^(participant|actor)\s+("[^"]+"|[\w.-]+)(?:\s+as\s+(.+))?$/i);
   if (!match) return null;
-  const kind = match[1].toLowerCase();
+
+  let kind = match[1].toLowerCase();
   const id = unquote(match[2]);
-  const label = match[3] ? unquote(match[3].trim()) : id;
+  let label = match[3] ? unquote(match[3].trim()) : id;
+
+  if (metaObj) {
+    if (typeof metaObj.type === 'string') {
+      const normalizedType = metaObj.type.toLowerCase();
+      if (MERMAID_PARTICIPANT_TYPES.has(normalizedType)) {
+        kind = normalizedType;
+      }
+    }
+    if (!match[3] && typeof metaObj.alias === 'string' && metaObj.alias.trim()) {
+      label = metaObj.alias.trim();
+    }
+  }
+
   return {
     id,
     label: label || id,
@@ -703,10 +767,11 @@ function parseMermaidParticipantLine(line) {
 function parseMermaidMessageLine(line) {
   // Supports Mermaid arrows:
   // ->>  (solid sync), -->> (dashed return/async), -> (solid), --> (dashed),
-  // -)   (solid async), --)  (dashed async), -x (solid cross), --x (dashed cross)
+  // -)   (solid async), --)  (dashed async), -x (solid cross), --x (dashed cross),
+  // <<->> (bidirectional solid), <<-->> (bidirectional dashed)
   // Plus inline activation suffixes + or - immediately after the arrow head (e.g. ->>+ or -->>-)
   const msgRegex =
-    /^("[^"]+"|[\w.-]+)\s*(-->>|->>|-->|->|--\)|-\)|--x|-x)\s*([+-])?\s*("[^"]+"|[\w.-]+)\s*(?::\s*(.*))?$/;
+    /^("[^"]+"|[\w.]+(?:-[\w.]+)*)\s*(<<-->>|<<->>|-->>|->>|-->|->|--\)|-\)|--x|-x)\s*([+-])?\s*("[^"]+"|[\w.]+(?:-[\w.]+)*)\s*(?::\s*(.*))?$/;
 
   const match = line.match(msgRegex);
   if (!match) return null;
@@ -717,7 +782,8 @@ function parseMermaidMessageLine(line) {
   const to = unquote(match[4]);
   const label = (match[5] || '').trim();
 
-  const isDashed = arrow.startsWith('--');
+  const isDashed = arrow.startsWith('--') || arrow.startsWith('<<--');
+  const isBidirectional = arrow.startsWith('<<');
   const isHalfAsync = arrow.endsWith(')');
 
   return {
@@ -727,6 +793,7 @@ function parseMermaidMessageLine(line) {
     label,
     isDashed,
     isLeftPointing: false,
+    isBidirectional,
     isHalfAsync,
     arrowColor: null,
     activateTarget: actModifier === '+',
@@ -743,6 +810,7 @@ function parseMermaid(sourceText) {
   let title = '';
   let autoNumberEnabled = false;
   let autoNumberCounter = 1;
+  let autoNumberStep = 1;
   let currentBox = null;
 
   const ensureParticipant = (id) => {
@@ -810,26 +878,57 @@ function parseMermaid(sourceText) {
       continue;
     }
 
-    // Autonumber
+    // Autonumber (supports: autonumber | autonumber off | autonumber <start> [step])
     if (/^autonumber\b/i.test(raw)) {
-      autoNumberEnabled = true;
-      const startNum = raw.match(/^autonumber\s+(\d+)/i);
-      if (startNum) autoNumberCounter = parseInt(startNum[1], 10);
+      if (/^autonumber\s+off\b/i.test(raw)) {
+        autoNumberEnabled = false;
+      } else {
+        autoNumberEnabled = true;
+        const numMatch = raw.match(/^autonumber\s+(\d+)(?:\s+(\d+))?/i);
+        if (numMatch) {
+          autoNumberCounter = parseInt(numMatch[1], 10);
+          autoNumberStep = numMatch[2] ? parseInt(numMatch[2], 10) || 1 : 1;
+        }
+      }
       continue;
     }
 
-    // Box swimlane start: box rgba(...) Team Name  OR  box "Team Name"
-    const boxMatch = raw.match(
-      /^box(?:\s+(rgba?\([^)]+\)|#[0-9a-fA-F]{3,8}|transparent|[a-zA-Z]+))?(?:\s+(.+))?$/i
-    );
-    if (boxMatch && /^box\b/i.test(raw)) {
-      let color = boxMatch[1] || null;
-      let label = boxMatch[2] ? unquote(boxMatch[2].trim()) : '';
-      // Handle `box "Team Name"` where group 1 captured `"Team Name"`
-      if (!label && color) {
-        label = unquote(color);
-        color = null;
+    // Box swimlane start: box rgba(...) Team Name | box "Team Name" | box Team Name
+    if (/^box\b/i.test(raw)) {
+      const rest = raw.slice(3).trim();
+      let color = null;
+      let label = '';
+
+      if (rest) {
+        const explicitColorMatch = rest.match(
+          /^((?:rgba?|hsla?)\([^)]+\)|#[0-9a-fA-F]{3,8}|transparent)(?:\s+(.*))?$/i
+        );
+        if (explicitColorMatch) {
+          color = explicitColorMatch[1];
+          label = explicitColorMatch[2] ? unquote(explicitColorMatch[2].trim()) : '';
+        } else if (rest.startsWith('"')) {
+          label = unquote(rest);
+        } else {
+          const spaceIdx = rest.search(/\s/);
+          if (spaceIdx !== -1) {
+            const firstToken = rest.slice(0, spaceIdx);
+            const remaining = rest.slice(spaceIdx + 1).trim();
+            const isNamedColor =
+              typeof CSS !== 'undefined' &&
+              typeof CSS.supports === 'function' &&
+              CSS.supports('color', firstToken);
+            if (isNamedColor) {
+              color = firstToken;
+              label = unquote(remaining);
+            } else {
+              label = unquote(rest);
+            }
+          } else {
+            label = unquote(rest);
+          }
+        }
       }
+
       const boxId = `box_${boxes.length}`;
       const boxObj = {
         id: boxId,
@@ -843,10 +942,11 @@ function parseMermaid(sourceText) {
       continue;
     }
 
-    // Participant / Actor
+    // Create participant / actor  OR  Participant / Actor (including @{ "type": ... })
+    const createMatch = raw.match(/^create\s+((?:participant|actor)\s+.+)$/i);
     const firstWord = raw.split(/\s+/)[0].toLowerCase();
-    if (firstWord === 'participant' || firstWord === 'actor') {
-      const p = parseMermaidParticipantLine(raw);
+    if (createMatch || firstWord === 'participant' || firstWord === 'actor') {
+      const p = parseMermaidParticipantLine(createMatch ? createMatch[1] : raw);
       if (p) {
         const boxId = currentBox ? currentBox.id : null;
         if (participantsMap.has(p.id)) {
@@ -864,8 +964,34 @@ function parseMermaid(sourceText) {
       continue;
     }
 
-    // Explicit activate / deactivate
-    const actMatch = raw.match(/^(activate|deactivate)\s+("[^"]+"|[\w.-]+)$/i);
+    // Participant link / links directives: link A: Label @ URL | links A: { ... }
+    const linkMatch = raw.match(/^links?\s+("[^"]+"|[\w.-]+)\s*:\s*(.+)$/i);
+    if (linkMatch) {
+      const targetId = unquote(linkMatch[1]);
+      const p = ensureParticipant(targetId);
+      const body = linkMatch[2].trim();
+      const existingLinks = p.links ? [...p.links] : [];
+      if (raw.toLowerCase().startsWith('links')) {
+        try {
+          const parsedLinks = JSON.parse(body);
+          Object.entries(parsedLinks).forEach(([label, url]) => {
+            existingLinks.push({ label, url: String(url) });
+          });
+        } catch {
+          // Ignore malformed JSON links payload without blocking diagram render
+        }
+      } else {
+        const singleMatch = body.match(/^(.+?)\s*@\s*(\S+)$/);
+        if (singleMatch) {
+          existingLinks.push({ label: singleMatch[1].trim(), url: singleMatch[2].trim() });
+        }
+      }
+      p.links = existingLinks;
+      continue;
+    }
+
+    // Explicit activate / deactivate / destroy
+    const actMatch = raw.match(/^(activate|deactivate|destroy)\s+("[^"]+"|[\w.-]+)$/i);
     if (actMatch) {
       const action = actMatch[1].toLowerCase();
       const target = unquote(actMatch[2]);
@@ -989,6 +1115,11 @@ function parseMermaid(sourceText) {
       const fromP = ensureParticipant(parsedMsg.from);
       const toP = ensureParticipant(parsedMsg.to);
       const metadata = consumePendingMeta(pendingMeta);
+      let nextAutoNum = null;
+      if (autoNumberEnabled) {
+        nextAutoNum = autoNumberCounter;
+        autoNumberCounter += autoNumberStep;
+      }
 
       getCurrentContainer().push({
         type: 'message',
@@ -997,7 +1128,7 @@ function parseMermaid(sourceText) {
         ...parsedMsg,
         toKind: toP.kind,
         fromKind: fromP.kind,
-        autoNumber: autoNumberEnabled ? autoNumberCounter++ : null,
+        autoNumber: nextAutoNum,
         metadata,
       });
       continue;
@@ -1093,6 +1224,49 @@ function finalizeUnifiedAST({
         continue;
       }
 
+      if (node.type === 'return_cmd') {
+        if (callStack.length === 0) {
+          warnings.push({
+            lineNum: node.lineNum,
+            message: `'return' without an active call frame.`,
+          });
+          continue;
+        }
+        const topIdx = callStack.length - 1;
+        const topFrame = callStack[topIdx];
+        node.type = 'message';
+        node.from = topFrame.callee;
+        node.to = topFrame.caller;
+        node.arrow = '-->';
+        node.isDashed = true;
+        node.isLeftPointing = false;
+        node.isBidirectional = false;
+        node.isHalfAsync = false;
+        node.arrowColor = null;
+        node.activateTarget = false;
+        node.deactivateSource = true;
+        node.fromKind = participantsMap.get(node.from)?.kind || 'participant';
+        node.toKind = participantsMap.get(node.to)?.kind || 'participant';
+        node.kind = 'return';
+        node.pairedCallId = null;
+        node.returnNodeId = null;
+        node.returnLabel = null;
+        node.subtreeNodeIds = [];
+        node.descendantStepCount = 0;
+        node.descendantFragmentCount = 0;
+        node.hasFoldableChildren = false;
+
+        orderedSteps.push(node);
+        node.stepIndex = orderedSteps.length;
+
+        for (let s = 0; s < topIdx; s++) {
+          callStack[s].callNode.subtreeNodeIds.push(node.id);
+          callStack[s].callNode.descendantStepCount += 1;
+        }
+        popFramesDownTo(topIdx, node);
+        continue;
+      }
+
       if (node.type === 'fragment') {
         recordDescendant(node);
         const entryStackDepth = callStack.length;
@@ -1146,7 +1320,10 @@ function finalizeUnifiedAST({
 
         // 2. Return arrow matching an open call frame
         let matchingFrameIdx = -1;
-        if (node.isDashed || node.isLeftPointing || node.deactivateSource) {
+        if (
+          (!node.isBidirectional && (node.isDashed || node.isLeftPointing)) ||
+          node.deactivateSource
+        ) {
           for (let s = callStack.length - 1; s >= 0; s--) {
             if (callStack[s].callee === node.from && callStack[s].caller === node.to) {
               matchingFrameIdx = s;
@@ -1610,8 +1787,11 @@ function computeSequenceLayout({
         const inset = nestingDepth * 12;
         let leftX, rightX;
         if (visibleFragXs.length > 0) {
-          leftX = Math.max(24 + inset, Math.min(...visibleFragXs) - 74 + inset);
-          rightX = Math.min(canvasWidth - 24 - inset, Math.max(...visibleFragXs) + 74 - inset);
+          leftX = Math.max(20 + inset, Math.min(...visibleFragXs) - 48 + inset);
+          rightX = Math.min(
+            canvasWidth - 20 - inset,
+            Math.max(...visibleFragXs) + (visibleFragXs.length === 1 ? 176 : 82) - inset
+          );
         } else {
           leftX = Math.max(24 + inset, canvasWidth / 2 - 180 + inset);
           rightX = Math.min(canvasWidth - 24 - inset, canvasWidth / 2 + 180 - inset);
@@ -1764,7 +1944,7 @@ function computeSequenceLayout({
           if (node.kind === 'call' && !isFoldedCall && fromHidden && !toHidden) {
             startActivation(toColId, y, node.id);
           } else if (node.kind === 'return' && node.pairedCallId) {
-            endActivation(toColId, y, node.pairedCallId);
+            endActivation(fromColId, y, node.pairedCallId);
           }
 
           cursorY += LAYOUT.ROW_HIDDEN_STUB;
@@ -1797,7 +1977,11 @@ function computeSequenceLayout({
             node,
             y,
             x: fromX,
+            colId: fromColId,
           });
+          if (node.kind === 'return' && node.pairedCallId) {
+            endActivation(toColId, y, node.pairedCallId);
+          }
           cursorY += LAYOUT.ROW_SELF_MESSAGE;
           continue;
         }
@@ -1810,12 +1994,14 @@ function computeSequenceLayout({
           y,
           fromX,
           toX,
+          fromColId,
+          toColId,
         });
 
         if (node.kind === 'call' && (node.hasFoldableChildren || node.activateTarget)) {
           startActivation(toColId, y, node.id);
         } else if (node.kind === 'return' && node.pairedCallId) {
-          endActivation(toColId, y, node.pairedCallId);
+          endActivation(fromColId, y, node.pairedCallId);
         }
 
         cursorY += LAYOUT.ROW_MESSAGE;
@@ -1840,7 +2026,7 @@ function computeSequenceLayout({
     });
   });
 
-  const totalHeight = Math.max(380, cursorY + 48);
+  const totalHeight = Math.max(150, cursorY + 24);
 
   return {
     columns,
@@ -1953,9 +2139,154 @@ function getStereotypeBadgeColors(kind, isDark) {
 // 5. MAIN UMLENS APPLICATION COMPONENT
 // ============================================================================
 
+const COLOR_THEMES = {
+  midnight: {
+    id: 'midnight',
+    label: 'Midnight Dark',
+    isDark: true,
+    bgApp: 'bg-zinc-950 text-zinc-100',
+    bgHeader: 'bg-zinc-900/95 border-zinc-800',
+    bgPanel: 'bg-zinc-900 border-zinc-800',
+    bgCanvas: 'bg-zinc-950',
+    textMuted: 'text-zinc-400',
+    textSubtle: 'text-zinc-500',
+    border: 'border-zinc-800',
+    btnGhost: 'bg-zinc-800/80 hover:bg-zinc-700/80 text-zinc-200 border-zinc-700/80',
+    btnAccent: 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-500',
+    svgBg: '#09090b',
+    lifelineStroke: '#3f3f46',
+    arrowSolid: '#e4e4e7',
+    arrowReturn: '#94a3b8',
+    arrowAsync: '#c084fc',
+    pillBg: '#18181b',
+    pillBorder: '#3f3f46',
+    pillText: '#f4f4f5',
+    activationFill: '#1e1b4b',
+    activationStroke: '#6366f1',
+    fragStroke: '#4f46e5',
+    fragFill: 'rgba(79, 70, 229, 0.05)',
+    fragTagFill: '#312e81',
+    fragTagText: '#c7d2fe',
+  },
+  light: {
+    id: 'light',
+    label: 'Crisp Light',
+    isDark: false,
+    bgApp: 'bg-slate-50 text-slate-900',
+    bgHeader: 'bg-white/95 border-slate-200',
+    bgPanel: 'bg-white border-slate-200',
+    bgCanvas: 'bg-[#f8fafc]',
+    textMuted: 'text-slate-600',
+    textSubtle: 'text-slate-400',
+    border: 'border-slate-200',
+    btnGhost: 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300',
+    btnAccent: 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-600',
+    svgBg: '#f8fafc',
+    lifelineStroke: '#cbd5e1',
+    arrowSolid: '#1e293b',
+    arrowReturn: '#64748b',
+    arrowAsync: '#7e22ce',
+    pillBg: '#ffffff',
+    pillBorder: '#cbd5e1',
+    pillText: '#0f172a',
+    activationFill: '#e0e7ff',
+    activationStroke: '#4f46e5',
+    fragStroke: '#6366f1',
+    fragFill: 'rgba(99, 102, 241, 0.04)',
+    fragTagFill: '#e0e7ff',
+    fragTagText: '#3730a3',
+  },
+  nord: {
+    id: 'nord',
+    label: 'Nordic Slate',
+    isDark: true,
+    bgApp: 'bg-slate-950 text-slate-100',
+    bgHeader: 'bg-slate-900/95 border-slate-800',
+    bgPanel: 'bg-slate-900 border-slate-800',
+    bgCanvas: 'bg-slate-950',
+    textMuted: 'text-slate-400',
+    textSubtle: 'text-slate-500',
+    border: 'border-slate-800',
+    btnGhost: 'bg-slate-800/80 hover:bg-slate-700/80 text-slate-200 border-slate-700/80',
+    btnAccent: 'bg-sky-600 hover:bg-sky-500 text-white border-sky-500',
+    svgBg: '#0b1220',
+    lifelineStroke: '#334155',
+    arrowSolid: '#e2e8f0',
+    arrowReturn: '#7dd3fc',
+    arrowAsync: '#38bdf8',
+    pillBg: '#0f172a',
+    pillBorder: '#334155',
+    pillText: '#f1f5f9',
+    activationFill: '#0c2d48',
+    activationStroke: '#38bdf8',
+    fragStroke: '#0284c7',
+    fragFill: 'rgba(56, 189, 248, 0.05)',
+    fragTagFill: '#0c4a6e',
+    fragTagText: '#bae6fd',
+  },
+  solarized: {
+    id: 'solarized',
+    label: 'Warm Paper',
+    isDark: false,
+    bgApp: 'bg-[#fdf6e3] text-[#073642]',
+    bgHeader: 'bg-[#eee8d5]/95 border-[#d5ccb4]',
+    bgPanel: 'bg-[#faf4e4] border-[#ddd4bc]',
+    bgCanvas: 'bg-[#fdf6e3]',
+    textMuted: 'text-[#586e75]',
+    textSubtle: 'text-[#839496]',
+    border: 'border-[#ddd4bc]',
+    btnGhost: 'bg-[#fdf6e3] hover:bg-[#eee8d5] text-[#073642] border-[#cbbda0]',
+    btnAccent: 'bg-[#268bd2] hover:bg-[#1e78b8] text-white border-[#268bd2]',
+    svgBg: '#fdf6e3',
+    lifelineStroke: '#cbbfa4',
+    arrowSolid: '#073642',
+    arrowReturn: '#586e75',
+    arrowAsync: '#6c71c4',
+    pillBg: '#eee8d5',
+    pillBorder: '#cbbfa4',
+    pillText: '#073642',
+    activationFill: '#e1ebd8',
+    activationStroke: '#2aa198',
+    fragStroke: '#268bd2',
+    fragFill: 'rgba(38, 139, 210, 0.05)',
+    fragTagFill: '#dde9ec',
+    fragTagText: '#073642',
+  },
+  emerald: {
+    id: 'emerald',
+    label: 'Forest Dark',
+    isDark: true,
+    bgApp: 'bg-[#040d0b] text-emerald-50',
+    bgHeader: 'bg-[#071512]/95 border-emerald-950',
+    bgPanel: 'bg-[#071512] border-emerald-950',
+    bgCanvas: 'bg-[#040d0b]',
+    textMuted: 'text-emerald-200/70',
+    textSubtle: 'text-emerald-400/50',
+    border: 'border-emerald-950',
+    btnGhost: 'bg-emerald-950/70 hover:bg-emerald-900/70 text-emerald-100 border-emerald-800/70',
+    btnAccent: 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500',
+    svgBg: '#040d0b',
+    lifelineStroke: '#1e3a34',
+    arrowSolid: '#d1fae5',
+    arrowReturn: '#6ee7b7',
+    arrowAsync: '#2dd4bf',
+    pillBg: '#071915',
+    pillBorder: '#1e3a34',
+    pillText: '#ecfdf5',
+    activationFill: '#064e3b',
+    activationStroke: '#10b981',
+    fragStroke: '#059669',
+    fragFill: 'rgba(16, 185, 129, 0.05)',
+    fragTagFill: '#065f46',
+    fragTagText: '#a7f3d0',
+  },
+};
+
 export default function App() {
   // Theme & Layout Drawers
-  const [isDark, setIsDark] = useState(true);
+  const [themeId, setThemeId] = useState('midnight');
+  const theme = COLOR_THEMES[themeId] || COLOR_THEMES.midnight;
+  const isDark = theme.isDark;
   const [isEditorOpen, setIsEditorOpen] = useState(true);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
   const [showSyntaxHelp, setShowSyntaxHelp] = useState(false);
@@ -2517,58 +2848,6 @@ export default function App() {
 
   const codeLines = useMemo(() => sourceCode.split(/\r?\n/), [sourceCode]);
 
-  const theme = isDark
-    ? {
-        bgApp: 'bg-zinc-950 text-zinc-100',
-        bgHeader: 'bg-zinc-900/95 border-zinc-800',
-        bgPanel: 'bg-zinc-900 border-zinc-800',
-        bgCanvas: 'bg-zinc-950',
-        textMuted: 'text-zinc-400',
-        textSubtle: 'text-zinc-500',
-        border: 'border-zinc-800',
-        btnGhost: 'bg-zinc-800/80 hover:bg-zinc-700/80 text-zinc-200 border-zinc-700/80',
-        btnAccent: 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-500',
-        svgBg: '#09090b',
-        lifelineStroke: '#3f3f46',
-        arrowSolid: '#e4e4e7',
-        arrowReturn: '#94a3b8',
-        arrowAsync: '#c084fc',
-        pillBg: '#18181b',
-        pillBorder: '#3f3f46',
-        pillText: '#f4f4f5',
-        activationFill: '#1e1b4b',
-        activationStroke: '#6366f1',
-        fragStroke: '#4f46e5',
-        fragFill: 'rgba(79, 70, 229, 0.05)',
-        fragTagFill: '#312e81',
-        fragTagText: '#c7d2fe',
-      }
-    : {
-        bgApp: 'bg-slate-50 text-slate-900',
-        bgHeader: 'bg-white/95 border-slate-200',
-        bgPanel: 'bg-white border-slate-200',
-        bgCanvas: 'bg-slate-100/70',
-        textMuted: 'text-slate-600',
-        textSubtle: 'text-slate-400',
-        border: 'border-slate-200',
-        btnGhost: 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300',
-        btnAccent: 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-600',
-        svgBg: '#f8fafc',
-        lifelineStroke: '#cbd5e1',
-        arrowSolid: '#1e293b',
-        arrowReturn: '#64748b',
-        arrowAsync: '#7e22ce',
-        pillBg: '#ffffff',
-        pillBorder: '#cbd5e1',
-        pillText: '#0f172a',
-        activationFill: '#e0e7ff',
-        activationStroke: '#4f46e5',
-        fragStroke: '#6366f1',
-        fragFill: 'rgba(99, 102, 241, 0.04)',
-        fragTagFill: '#e0e7ff',
-        fragTagText: '#3730a3',
-      };
-
   const activeFiltersCount =
     hiddenLifelines.size +
     foldedCallIds.size +
@@ -2738,9 +3017,29 @@ export default function App() {
             )}
           </button>
 
+          <div className={`flex items-center gap-1 rounded-lg border px-2 py-1 ${theme.btnGhost}`}>
+            <Palette className="w-3.5 h-3.5 opacity-75 shrink-0" />
+            <select
+              aria-label="Color Theme"
+              value={themeId}
+              onChange={(e) => setThemeId(e.target.value)}
+              className="text-xs font-medium bg-transparent outline-none cursor-pointer"
+            >
+              {Object.values(COLOR_THEMES).map((t) => (
+                <option
+                  key={t.id}
+                  value={t.id}
+                  className={isDark ? 'bg-zinc-900 text-zinc-100' : 'bg-white text-slate-900'}
+                >
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
           <button
-            onClick={() => setIsDark((v) => !v)}
-            title={isDark ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            onClick={() => setThemeId((id) => (COLOR_THEMES[id]?.isDark ? 'light' : 'midnight'))}
+            title={isDark ? 'Quick Switch to Light Mode' : 'Quick Switch to Dark Mode'}
             className={`p-1.5 rounded-lg border transition cursor-pointer ${theme.btnGhost}`}
           >
             {isDark ? (
@@ -2796,14 +3095,15 @@ export default function App() {
                       <div className="p-2 rounded bg-indigo-500/10 border border-indigo-500/20">
                         <div className="font-bold text-indigo-400 mb-0.5">PlantUML (.puml)</div>
                         box &quot;Team&quot; #0ea5e9 ... end box
-                        <br />A -&gt; B ++ : syncCall() / B --&gt; A -- : ret
+                        <br />A -&gt; B ++ : syncCall() / return Result
                         <br />alt / else / opt / loop / par / end
                         <br />&apos; @contract: ... | &apos; @question[open]: ...
                       </div>
                       <div className="p-2 rounded bg-emerald-500/10 border border-emerald-500/20">
                         <div className="font-bold text-emerald-400 mb-0.5">Mermaid (.mmd)</div>
                         sequenceDiagram / box rgba(...) Team ... end
-                        <br />A-&gt;&gt;+B: syncCall() / B--&gt;&gt;-A: ret / A-)B: async
+                        <br />A-&gt;&gt;+B: call / B--&gt;&gt;-A: ret / A&lt;&lt;-&gt;&gt;B: bidir
+                        <br />create / destroy / participant X@&#123;&quot;type&quot;:&quot;database&quot;&#125;
                         <br />rect rgba(...) ... end | par ... and ... end
                         <br />%% @contract: ... | %% @decision: ...
                       </div>
@@ -3326,7 +3626,7 @@ export default function App() {
                       <marker
                         id="arrow-solid"
                         viewBox="0 0 10 10"
-                        refX="9"
+                        refX="10"
                         refY="5"
                         markerWidth="7"
                         markerHeight="7"
@@ -3337,7 +3637,7 @@ export default function App() {
                       <marker
                         id="arrow-selected"
                         viewBox="0 0 10 10"
-                        refX="9"
+                        refX="10"
                         refY="5"
                         markerWidth="7"
                         markerHeight="7"
@@ -3348,7 +3648,7 @@ export default function App() {
                       <marker
                         id="arrow-return"
                         viewBox="0 0 10 10"
-                        refX="9"
+                        refX="9.5"
                         refY="5"
                         markerWidth="7"
                         markerHeight="7"
@@ -3366,7 +3666,7 @@ export default function App() {
                       <marker
                         id="arrow-async"
                         viewBox="0 0 10 10"
-                        refX="9"
+                        refX="9.5"
                         refY="5"
                         markerWidth="7"
                         markerHeight="7"
@@ -3403,7 +3703,7 @@ export default function App() {
                         </g>
                       ))}
 
-                    {/* 2. LAYER: COMBINED FRAGMENTS (ALT / ELSE / OPT / LOOP / PAR) */}
+                    {/* 2. LAYER: COMBINED FRAGMENT TRANSLUCENT BACKDROPS (BEHIND LIFELINES) */}
                     {layout.renderItems
                       .filter((item) => item.type === 'fragment')
                       .map((frag) => {
@@ -3411,124 +3711,16 @@ export default function App() {
                         const height = Math.max(36, frag.bottomY - frag.topY);
 
                         return (
-                          <g key={frag.id}>
-                            <rect
-                              x={frag.leftX}
-                              y={frag.topY}
-                              width={width}
-                              height={height}
-                              rx="8"
-                              fill={theme.fragFill}
-                              stroke={theme.fragStroke}
-                              strokeWidth="1.4"
-                            />
-
-                            {frag.branchHeaders.map((bh) => {
-                              const tagText = bh.keyword;
-                              const tagW = tagText.length * 8 + 30;
-                              const condText = bh.label || (bh.isFirst ? '' : 'default');
-                              const maxCondChars = Math.max(12, Math.floor((width - tagW - 28) / 6.5));
-                              const displayCond =
-                                condText.length > maxCondChars
-                                  ? `${condText.slice(0, maxCondChars - 1)}…`
-                                  : condText;
-
-                              return (
-                                <g key={bh.branchId}>
-                                  {!bh.isFirst && (
-                                    <line
-                                      x1={frag.leftX}
-                                      y1={bh.y}
-                                      x2={frag.rightX}
-                                      y2={bh.y}
-                                      stroke={theme.fragStroke}
-                                      strokeWidth="1.2"
-                                      strokeDasharray="5 4"
-                                    />
-                                  )}
-
-                                  <g
-                                    onClick={() => toggleFoldBranch(bh.branchId)}
-                                    className="cursor-pointer"
-                                  >
-                                    <title>
-                                      {bh.isFolded
-                                        ? `Expand [${tagText}] ${condText}`
-                                        : `Collapse [${tagText}] ${condText}`}
-                                    </title>
-                                    <path
-                                      d={`M ${frag.leftX} ${bh.y} H ${frag.leftX + tagW} L ${
-                                        frag.leftX + tagW + 8
-                                      } ${bh.y + 11} L ${frag.leftX + tagW} ${bh.y + 22} H ${frag.leftX} Z`}
-                                      fill={theme.fragTagFill}
-                                      stroke={theme.fragStroke}
-                                      strokeWidth="1"
-                                    />
-                                    <text
-                                      x={frag.leftX + 8}
-                                      y={bh.y + 15}
-                                      fill={theme.fragTagText}
-                                      fontSize="11"
-                                      fontFamily="monospace"
-                                      fontWeight="700"
-                                    >
-                                      {bh.isFolded ? '▸' : '▾'}
-                                    </text>
-                                    <text
-                                      x={frag.leftX + 20}
-                                      y={bh.y + 15}
-                                      fill={theme.fragTagText}
-                                      fontSize="10"
-                                      fontFamily="monospace"
-                                      fontWeight="700"
-                                    >
-                                      {tagText}
-                                    </text>
-
-                                    {displayCond && (
-                                      <text
-                                        x={frag.leftX + tagW + 14}
-                                        y={bh.y + 15}
-                                        fill={isDark ? '#c7d2fe' : '#312e81'}
-                                        fontSize="11"
-                                        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-                                        fontWeight="600"
-                                      >
-                                        {displayCond}
-                                      </text>
-                                    )}
-
-                                    {bh.isFolded && (
-                                      <g>
-                                        <rect
-                                          x={frag.leftX + 14}
-                                          y={bh.y + 27}
-                                          width={Math.max(120, width - 28)}
-                                          height="22"
-                                          rx="6"
-                                          fill={isDark ? '#1e1b4b' : '#eef2ff'}
-                                          stroke={theme.fragStroke}
-                                          strokeDasharray="3 3"
-                                          strokeWidth="1"
-                                        />
-                                        <text
-                                          x={frag.leftX + width / 2}
-                                          y={bh.y + 41}
-                                          textAnchor="middle"
-                                          fill={isDark ? '#a5b4fc' : '#4338ca'}
-                                          fontSize="10.5"
-                                          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-                                        >
-                                          ▸ Branch folded ({bh.stepCount}{' '}
-                                          {bh.stepCount === 1 ? 'item' : 'items'} hidden — click to expand)
-                                        </text>
-                                      </g>
-                                    )}
-                                  </g>
-                                </g>
-                              );
-                            })}
-                          </g>
+                          <rect
+                            key={`bg_${frag.id}`}
+                            x={frag.leftX}
+                            y={frag.topY}
+                            width={width}
+                            height={height}
+                            rx="8"
+                            fill={theme.fragFill}
+                            stroke="none"
+                          />
                         );
                       })}
 
@@ -3542,7 +3734,7 @@ export default function App() {
                           x1={x}
                           y1={0}
                           x2={x}
-                          y2={layout.totalHeight - 16}
+                          y2={layout.totalHeight - 12}
                           stroke={
                             isHighlighted
                               ? '#6366f1'
@@ -3590,8 +3782,145 @@ export default function App() {
                       );
                     })}
 
+                    {/* 4.5 LAYER: COMBINED FRAGMENT FRAMES, DIVIDERS, PENTAGONS & LABELS (ABOVE LIFELINES & ACTIVATIONS) */}
+                    {layout.renderItems
+                      .filter((item) => item.type === 'fragment')
+                      .map((frag) => {
+                        const width = Math.max(140, frag.rightX - frag.leftX);
+                        const height = Math.max(36, frag.bottomY - frag.topY);
+                        return (
+                          <g key={`hdr_${frag.id}`}>
+                            <rect
+                              x={frag.leftX}
+                              y={frag.topY}
+                              width={width}
+                              height={height}
+                              rx="8"
+                              fill="none"
+                              stroke={theme.fragStroke}
+                              strokeWidth="1.4"
+                            />
+                            {frag.branchHeaders.map((bh) => {
+                              const tagText = bh.keyword;
+                              const tagW = tagText.length * 8 + 30;
+                              const condText = bh.label || (bh.isFirst ? '' : 'default');
+                              const maxCondChars = Math.max(12, Math.floor((width - tagW - 22) / 6.2));
+                              const displayCond =
+                                condText.length > maxCondChars
+                                  ? `${condText.slice(0, maxCondChars - 1)}…`
+                                  : condText;
+
+                              return (
+                                <g key={bh.branchId}>
+                                  {!bh.isFirst && (
+                                    <line
+                                      x1={frag.leftX}
+                                      y1={bh.y}
+                                      x2={frag.rightX}
+                                      y2={bh.y}
+                                      stroke={theme.fragStroke}
+                                      strokeWidth="1.2"
+                                      strokeDasharray="5 4"
+                                    />
+                                  )}
+                                  <g
+                                    onClick={() => toggleFoldBranch(bh.branchId)}
+                                    className="cursor-pointer"
+                                  >
+                                    <title>
+                                      {bh.isFolded
+                                        ? `Expand [${tagText}] ${condText}`
+                                        : `Collapse [${tagText}] ${condText}`}
+                                    </title>
+                                    <path
+                                      d={`M ${frag.leftX} ${bh.y} H ${frag.leftX + tagW} L ${
+                                        frag.leftX + tagW + 8
+                                      } ${bh.y + 11} L ${frag.leftX + tagW} ${bh.y + 22} H ${frag.leftX} Z`}
+                                      fill={theme.fragTagFill}
+                                      stroke={theme.fragStroke}
+                                      strokeWidth="1"
+                                    />
+                                    <text
+                                      x={frag.leftX + 8}
+                                      y={bh.y + 15}
+                                      fill={theme.fragTagText}
+                                      fontSize="11"
+                                      fontFamily="monospace"
+                                      fontWeight="700"
+                                    >
+                                      {bh.isFolded ? '▸' : '▾'}
+                                    </text>
+                                    <text
+                                      x={frag.leftX + 20}
+                                      y={bh.y + 15}
+                                      fill={theme.fragTagText}
+                                      fontSize="10"
+                                      fontFamily="monospace"
+                                      fontWeight="700"
+                                    >
+                                      {tagText}
+                                    </text>
+
+                                    {displayCond && (
+                                      <text
+                                        x={frag.leftX + tagW + 14}
+                                        y={bh.y + 15}
+                                        fill={isDark ? '#c7d2fe' : '#312e81'}
+                                        fontSize="10.5"
+                                        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                                        fontWeight="600"
+                                      >
+                                        {displayCond}
+                                      </text>
+                                    )}
+
+                                    {bh.isFolded && (
+                                      <g>
+                                        <rect
+                                          x={frag.leftX + 14}
+                                          y={bh.y + 27}
+                                          width={Math.max(120, width - 28)}
+                                          height="22"
+                                          rx="6"
+                                          fill={isDark ? '#1e1b4b' : '#eef2ff'}
+                                          stroke={theme.fragStroke}
+                                          strokeDasharray="3 3"
+                                          strokeWidth="1"
+                                        />
+                                        <text
+                                          x={frag.leftX + width / 2}
+                                          y={bh.y + 41}
+                                          textAnchor="middle"
+                                          fill={isDark ? '#a5b4fc' : '#4338ca'}
+                                          fontSize="10.5"
+                                          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                                        >
+                                          ▸ Branch folded ({bh.stepCount}{' '}
+                                          {bh.stepCount === 1 ? 'item' : 'items'} hidden — click to expand)
+                                        </text>
+                                      </g>
+                                    )}
+                                  </g>
+                                </g>
+                              );
+                            })}
+                          </g>
+                        );
+                      })}
+
                     {/* 5. LAYER: MESSAGES, NOTES, DIVIDERS, FOLDED CALLS, TEAM & HIDDEN BADGES */}
-                    {layout.renderItems.map((item) => {
+                    {(() => {
+                      const getColumnEdgeX = (colId, centerX, y, side) => {
+                        const matching = layout.activationSpans.filter(
+                          (act) => act.colId === colId && y >= act.startY - 1 && y <= act.endY + 1
+                        );
+                        if (matching.length === 0) return centerX;
+                        if (side === 'right') {
+                          return Math.max(...matching.map((act) => act.x - 6 + act.depth * 4 + 12));
+                        }
+                        return Math.min(...matching.map((act) => act.x - 6 + act.depth * 4));
+                      };
+                      return layout.renderItems.map((item) => {
                       // 5a. Divider
                       if (item.type === 'divider') {
                         const badgeW = Math.min(340, Math.max(120, item.label.length * 7.5 + 32));
@@ -3749,16 +4078,16 @@ export default function App() {
                               width={badgeW}
                               height="26"
                               rx="13"
-                              fill={isDark ? '#27201c' : '#fffbeb'}
-                              stroke={isDark ? '#d97706' : '#f59e0b'}
+                              fill={isDark ? '#18181b' : '#f8fafc'}
+                              stroke={isDark ? '#52525b' : '#cbd5e1'}
                               strokeDasharray="4 3"
-                              strokeWidth="1.2"
+                              strokeWidth="1"
                             />
                             <text
                               x={layout.canvasWidth / 2}
                               y={item.y + 4}
                               textAnchor="middle"
-                              fill={isDark ? '#fcd34d' : '#92400e'}
+                              fill={isDark ? '#a1a1aa' : '#64748b'}
                               fontSize="11"
                               fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                               fontWeight="600"
@@ -3778,8 +4107,13 @@ export default function App() {
                         const stubLineLen = 14;
 
                         const isRight = item.side === 'right';
-                        const lineX1 = item.visibleX;
-                        const lineX2 = isRight ? item.visibleX + stubLineLen : item.visibleX - stubLineLen;
+                        const lineX1 = getColumnEdgeX(
+                          item.visibleColId,
+                          item.visibleX,
+                          item.y,
+                          isRight ? 'right' : 'left'
+                        );
+                        const lineX2 = isRight ? lineX1 + stubLineLen : lineX1 - stubLineLen;
                         const pillX = isRight ? lineX2 : lineX2 - pillW;
 
                         return (
@@ -3800,8 +4134,8 @@ export default function App() {
                               y1={item.y}
                               x2={lineX2}
                               y2={item.y}
-                              stroke={isDark ? '#f59e0b' : '#d97706'}
-                              strokeWidth="1.6"
+                              stroke={isDark ? '#71717a' : '#94a3b8'}
+                              strokeWidth="1.3"
                               strokeDasharray={item.node.isDashed ? '3 2' : undefined}
                             />
                             <rect
@@ -3810,18 +4144,19 @@ export default function App() {
                               width={pillW}
                               height="24"
                               rx="12"
-                              fill={isDark ? '#291d0e' : '#fef3c7'}
-                              stroke={isDark ? '#f59e0b' : '#d97706'}
-                              strokeWidth="1.2"
+                              fill={isDark ? '#18181b' : '#f1f5f9'}
+                              stroke={isDark ? '#3f3f46' : '#cbd5e1'}
+                              strokeDasharray="3 2"
+                              strokeWidth="1"
                             />
                             <text
                               x={pillX + pillW / 2}
                               y={item.y + 4}
                               textAnchor="middle"
-                              fill={isDark ? '#fde68a' : '#78350f'}
+                              fill={isDark ? '#a1a1aa' : '#475569'}
                               fontSize="10.5"
                               fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-                              fontWeight="600"
+                              fontWeight="500"
                             >
                               {displayText}
                             </text>
@@ -3888,10 +4223,11 @@ export default function App() {
 
                       // 5g. Self Message
                       if (item.type === 'self_message') {
-                        const { node, x, y } = item;
+                        const { node, x, y, colId } = item;
                         const isSelected = selectedMessageLine === node.lineNum;
                         const loopW = 42;
                         const loopH = 22;
+                        const edgeX = getColumnEdgeX(colId, x, y, 'right');
                         const labelText = node.label || 'self()';
                         const clipped = labelText.length > 26 ? `${labelText.slice(0, 25)}…` : labelText;
 
@@ -3908,7 +4244,7 @@ export default function App() {
                             className="cursor-pointer"
                           >
                             <path
-                              d={`M ${x} ${y - 8} H ${x + loopW} V ${y + loopH - 8} H ${x + 2}`}
+                              d={`M ${edgeX} ${y - 8} H ${edgeX + loopW} V ${y + loopH - 8} H ${edgeX + 2}`}
                               fill="none"
                               stroke={isSelected ? '#38bdf8' : theme.arrowSolid}
                               strokeWidth={isSelected ? '2.2' : '1.6'}
@@ -3916,7 +4252,7 @@ export default function App() {
                               markerEnd={isSelected ? 'url(#arrow-selected)' : 'url(#arrow-solid)'}
                             />
                             <text
-                              x={x + loopW + 8}
+                              x={edgeX + loopW + 8}
                               y={y + 6}
                               fill={isSelected ? '#38bdf8' : theme.pillText}
                               fontSize="11"
@@ -3931,7 +4267,10 @@ export default function App() {
 
                       // 5h. Standard Visible-to-Visible Message Arrow + Pill + Metadata Badges
                       if (item.type === 'message') {
-                        const { node, fromX, toX, y } = item;
+                        const { node, fromX, toX, y, fromColId, toColId } = item;
+                        const isRightward = toX >= fromX;
+                        const x1 = getColumnEdgeX(fromColId, fromX, y, isRightward ? 'right' : 'left');
+                        const x2 = getColumnEdgeX(toColId, toX, y, isRightward ? 'left' : 'right');
                         const isReturn = node.kind === 'return';
                         const isAsync = node.kind === 'async';
                         const canFold = node.kind === 'call' && node.hasFoldableChildren;
@@ -3958,22 +4297,22 @@ export default function App() {
                           ? 'url(#arrow-async)'
                           : 'url(#arrow-solid)';
 
-                        const midX = (fromX + toX) / 2;
-                        const spanDist = Math.abs(toX - fromX);
+                        const midX = (x1 + x2) / 2;
+                        const spanDist = Math.abs(x2 - x1);
                         const numPrefix = node.autoNumber !== null ? `${node.autoNumber}. ` : '';
                         const foldPrefix = canFold ? '▾ ' : '';
                         const rawLabel = `${foldPrefix}${numPrefix}${
                           node.label || (isReturn ? 'return' : '')
                         }`;
-                        const maxChars = Math.max(15, Math.floor((spanDist - 16) / 6.3));
+                        const maxChars = Math.max(15, Math.floor((spanDist - 12) / 6.3));
                         const displayLabel =
                           rawLabel.length > maxChars
                             ? `${rawLabel.slice(0, maxChars - 1)}…`
                             : rawLabel;
 
                         const pillW = Math.min(
-                          spanDist - 12,
-                          Math.max(54, displayLabel.length * 6.4 + 20)
+                          Math.max(40, spanDist - 8),
+                          Math.max(40, displayLabel.length * 6.4 + 12)
                         );
 
                         return (
@@ -3992,9 +4331,9 @@ export default function App() {
                           >
                             {/* Invisible Wide Hit Target for Effortless Arrow Clicking */}
                             <line
-                              x1={fromX}
+                              x1={x1}
                               y1={y}
-                              x2={toX}
+                              x2={x2}
                               y2={y}
                               stroke="transparent"
                               strokeWidth="16"
@@ -4002,17 +4341,18 @@ export default function App() {
 
                             {/* Visible Horizontal Message Arrow */}
                             <line
-                              x1={fromX}
+                              x1={x1}
                               y1={y}
-                              x2={toX}
+                              x2={x2}
                               y2={y}
                               stroke={strokeColor}
                               strokeWidth={isSelected ? '2.4' : isReturn ? '1.4' : '1.7'}
                               strokeDasharray={node.isDashed || isReturn ? '5 4' : undefined}
+                              markerStart={node.isBidirectional ? markerId : undefined}
                               markerEnd={markerId}
                             />
 
-                            {/* Message Label Pill Above Arrow */}
+                            {/* Borderless Message Label Above Arrow (masks lifelines cleanly) */}
                             {displayLabel && (
                               <g>
                                 <rect
@@ -4020,26 +4360,15 @@ export default function App() {
                                   y={y - 22}
                                   width={pillW}
                                   height="19"
-                                  rx="5"
+                                  rx="4"
                                   fill={
                                     isSelected
                                       ? isDark
-                                        ? '#0c4a6e'
-                                        : '#e0f2fe'
-                                      : canFold
-                                      ? isDark
-                                        ? '#1e1b4b'
-                                        : '#eef2ff'
-                                      : theme.pillBg
+                                        ? 'rgba(56, 189, 248, 0.16)'
+                                        : 'rgba(14, 165, 233, 0.12)'
+                                      : theme.svgBg
                                   }
-                                  stroke={
-                                    isSelected
-                                      ? '#38bdf8'
-                                      : canFold
-                                      ? '#6366f1'
-                                      : theme.pillBorder
-                                  }
-                                  strokeWidth={isSelected || canFold ? '1.3' : '0.9'}
+                                  stroke="none"
                                 />
 
                                 {/* Clicking the left fold chevron folds the call subtree directly */}
@@ -4129,7 +4458,8 @@ export default function App() {
                       }
 
                       return null;
-                    })}
+                    });
+                    })()}
                   </svg>
                 </div>
               </div>
