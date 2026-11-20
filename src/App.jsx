@@ -1660,6 +1660,7 @@ function computeSequenceLayout({
   hiddenLifelines,
   foldedCallIds,
   foldedBranchIds,
+  foldedDividerIds = new Set(),
   collapsedBoxIds,
   stepLimit, // null when Step-Through is off, or 0..N when Step-Through is active
 }) {
@@ -1738,14 +1739,20 @@ function computeSequenceLayout({
   const activationSpans = [];
   const openActivations = new Map();
 
-  const startActivation = (colId, y, callId, color = null) => {
+  const startActivation = (colId, y, callId, color = null, collapsedDividerId = null) => {
     if (hiddenLifelines.has(colId)) return;
     const stack = openActivations.get(colId) || [];
-    stack.push({ startY: y, callId, depth: stack.length, color: color || null });
+    stack.push({
+      startY: y,
+      callId,
+      depth: stack.length,
+      color: color || null,
+      collapsedDividerId,
+    });
     openActivations.set(colId, stack);
   };
 
-  const endActivation = (colId, y, callId = null) => {
+  const endActivation = (colId, y, callId = null, collapsedDividerId = null) => {
     if (hiddenLifelines.has(colId)) return;
     const stack = openActivations.get(colId);
     if (!stack || stack.length === 0) return;
@@ -1757,6 +1764,9 @@ function computeSequenceLayout({
     }
     const [closed] = stack.splice(idx, 1);
     if (closed) {
+      if (collapsedDividerId && closed.collapsedDividerId === collapsedDividerId) {
+        return;
+      }
       activationSpans.push({
         colId,
         x: columnXMap.get(colId),
@@ -1766,6 +1776,95 @@ function computeSequenceLayout({
         callId: closed.callId,
         color: closed.color || null,
       });
+    }
+  };
+
+  const countSectionItems = (list) => {
+    let count = 0;
+    for (const n of list) {
+      if (skippedByFoldedCall.has(n.id)) continue;
+      if (n.type === 'message') {
+        if (stepLimit !== null && n.stepIndex > stepLimit) continue;
+        count += 1;
+      } else if (n.type === 'note') {
+        count += 1;
+      } else if (n.type === 'highlight_band') {
+        count += countSectionItems(n.children);
+      } else if (n.type === 'fragment') {
+        for (const branch of n.branches) {
+          count += countSectionItems(branch.children);
+        }
+      }
+    }
+    return count;
+  };
+
+  const processCollapsedDividerActivations = (sectionNodes, dividerId, dividerY) => {
+    for (const n of sectionNodes) {
+      if (skippedByFoldedCall.has(n.id)) continue;
+
+      if (n.type === 'activation_cmd') {
+        const targetCol = participantToColumnId.get(n.target) || n.target;
+        if (n.action === 'activate') {
+          startActivation(targetCol, dividerY, n.id, n.color || null, dividerId);
+        } else {
+          endActivation(targetCol, dividerY, null, dividerId);
+        }
+        continue;
+      }
+
+      if (n.type === 'highlight_band') {
+        processCollapsedDividerActivations(n.children, dividerId, dividerY);
+        continue;
+      }
+
+      if (n.type === 'fragment') {
+        for (const branch of n.branches) {
+          if (!foldedBranchIds.has(branch.id)) {
+            processCollapsedDividerActivations(branch.children, dividerId, dividerY);
+          }
+        }
+        continue;
+      }
+
+      if (n.type === 'message') {
+        if (stepLimit !== null && n.stepIndex > stepLimit) continue;
+
+        const fromColId = participantToColumnId.get(n.from) || n.from;
+        const toColId = participantToColumnId.get(n.to) || n.to;
+        const fromHidden = hiddenLifelines.has(fromColId);
+        const toHidden = hiddenLifelines.has(toColId);
+        const isFoldedCall = n.kind === 'call' && foldedCallIds.has(n.id);
+
+        if (fromHidden && toHidden) continue;
+        if (fromColId === toColId && fromColId.startsWith('group:') && n.from !== n.to) {
+          continue;
+        }
+
+        if (fromHidden !== toHidden) {
+          if (n.kind === 'call' && !isFoldedCall && fromHidden && !toHidden) {
+            startActivation(toColId, dividerY, n.id, n.activationColor || null, dividerId);
+          } else if (n.kind === 'return' && n.pairedCallId) {
+            endActivation(fromColId, dividerY, n.pairedCallId, dividerId);
+          }
+          continue;
+        }
+
+        if (isFoldedCall) continue;
+
+        if (fromColId === toColId) {
+          if (n.kind === 'return' && n.pairedCallId) {
+            endActivation(toColId, dividerY, n.pairedCallId, dividerId);
+          }
+          continue;
+        }
+
+        if (n.kind === 'call' && (n.hasFoldableChildren || n.activateTarget)) {
+          startActivation(toColId, dividerY, n.id, n.activationColor || null, dividerId);
+        } else if (n.kind === 'return' && n.pairedCallId) {
+          endActivation(fromColId, dividerY, n.pairedCallId, dividerId);
+        }
+      }
     }
   };
 
@@ -1832,14 +1931,27 @@ function computeSequenceLayout({
         if (stepLimit !== null && cursorY > LAYOUT.TOP_START && stepLimit === 0) continue;
         flushHiddenCluster();
         flushGroupInternalCluster();
+        let nextDividerIdx = i + 1;
+        while (nextDividerIdx < nodes.length && nodes[nextDividerIdx].type !== 'divider') {
+          nextDividerIdx += 1;
+        }
+        const sectionNodes = nodes.slice(i + 1, nextDividerIdx);
+        const stepCount = countSectionItems(sectionNodes);
+        const isCollapsed = Boolean(foldedDividerIds && foldedDividerIds.has(node.id));
         const y = cursorY + 20;
         renderItems.push({
           type: 'divider',
           id: node.id,
           y,
           label: node.label,
+          isCollapsed,
+          stepCount,
         });
         cursorY += LAYOUT.ROW_DIVIDER;
+        if (isCollapsed) {
+          processCollapsedDividerActivations(sectionNodes, node.id, y);
+          i = nextDividerIdx - 1;
+        }
         continue;
       }
 
@@ -2442,6 +2554,7 @@ export default function App() {
   const [hiddenLifelines, setHiddenLifelines] = useState(() => new Set());
   const [foldedCallIds, setFoldedCallIds] = useState(() => new Set());
   const [foldedBranchIds, setFoldedBranchIds] = useState(() => new Set());
+  const [foldedDividerIds, setFoldedDividerIds] = useState(() => new Set());
   const [customLifelineOrder, setCustomLifelineOrder] = useState([]);
 
   // Step-Through Presentation Mode State
@@ -2528,6 +2641,7 @@ export default function App() {
         hiddenLifelines,
         foldedCallIds,
         foldedBranchIds,
+        foldedDividerIds,
         collapsedBoxIds,
         stepLimit: isStepMode ? currentStep : null,
       }),
@@ -2537,6 +2651,7 @@ export default function App() {
       hiddenLifelines,
       foldedCallIds,
       foldedBranchIds,
+      foldedDividerIds,
       collapsedBoxIds,
       isStepMode,
       currentStep,
@@ -2600,6 +2715,7 @@ export default function App() {
     setHiddenLifelines(new Set());
     setFoldedCallIds(new Set());
     setFoldedBranchIds(new Set());
+    setFoldedDividerIds(new Set());
     setCustomLifelineOrder([]);
     setIsStepMode(false);
     setCurrentStep(1);
@@ -2676,6 +2792,7 @@ export default function App() {
       if (maxDepth === Infinity) {
         setFoldedCallIds(new Set());
         setFoldedBranchIds(new Set());
+        setFoldedDividerIds(new Set());
         return;
       }
       const nextFolded = new Set();
@@ -2711,6 +2828,16 @@ export default function App() {
       const next = new Set(prev);
       if (next.has(branchId)) next.delete(branchId);
       else next.add(branchId);
+      return next;
+    });
+  }, []);
+
+  // Toggle Divider Region Folding (== Section ==)
+  const toggleFoldDivider = useCallback((dividerId) => {
+    setFoldedDividerIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(dividerId)) next.delete(dividerId);
+      else next.add(dividerId);
       return next;
     });
   }, []);
@@ -2987,6 +3114,7 @@ export default function App() {
         setHiddenLifelines(new Set());
         setFoldedCallIds(new Set());
         setFoldedBranchIds(new Set());
+        setFoldedDividerIds(new Set());
         setCustomLifelineOrder([]);
         setSelectedMessageLine(null);
         triggerToast(`Loaded ${file.name}`);
@@ -3017,6 +3145,7 @@ export default function App() {
     hiddenLifelines.size +
     foldedCallIds.size +
     foldedBranchIds.size +
+    foldedDividerIds.size +
     collapsedBoxIds.size +
     (isOrderModified ? 1 : 0);
 
@@ -3453,6 +3582,7 @@ export default function App() {
                     setHiddenLifelines(new Set());
                     setFoldedCallIds(new Set());
                     setFoldedBranchIds(new Set());
+                    setFoldedDividerIds(new Set());
                     setCustomLifelineOrder([]);
                   }}
                   className="flex items-center gap-1 text-[11px] font-medium px-2 py-1 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 transition cursor-pointer"
@@ -4199,11 +4329,25 @@ export default function App() {
                         return Math.min(...matching.map((act) => act.x - 6 + act.depth * 4));
                       };
                       return layout.renderItems.map((item) => {
-                      // 5a. Divider
+                      // 5a. Divider (== Section ==) — clickable to collapse/expand its region
                       if (item.type === 'divider') {
-                        const badgeW = Math.min(340, Math.max(120, item.label.length * 7.5 + 32));
+                        const displayLabel = `${item.isCollapsed ? '▸' : '▾'} ${item.label}`;
+                        const badgeW = Math.min(380, Math.max(136, displayLabel.length * 7.5 + 36));
+                        const lineOpacity = item.isCollapsed ? 0.65 : 1;
                         return (
-                          <g key={item.id}>
+                          <g
+                            key={item.id}
+                            onClick={() => toggleFoldDivider(item.id)}
+                            onMouseEnter={() =>
+                              setHoveredItem({
+                                tooltip: item.isCollapsed
+                                  ? `Expand "${item.label}" (${item.stepCount} hidden)`
+                                  : `Collapse "${item.label}" region (${item.stepCount} items)`,
+                              })
+                            }
+                            onMouseLeave={() => setHoveredItem(null)}
+                            className="cursor-pointer"
+                          >
                             <line
                               x1={32}
                               y1={item.y - 2}
@@ -4211,6 +4355,8 @@ export default function App() {
                               y2={item.y - 2}
                               stroke={theme.lifelineStroke}
                               strokeWidth="1"
+                              strokeOpacity={lineOpacity}
+                              strokeDasharray={item.isCollapsed ? '5 4' : undefined}
                             />
                             <line
                               x1={32}
@@ -4219,6 +4365,8 @@ export default function App() {
                               y2={item.y + 2}
                               stroke={theme.lifelineStroke}
                               strokeWidth="1"
+                              strokeOpacity={lineOpacity}
+                              strokeDasharray={item.isCollapsed ? '5 4' : undefined}
                             />
                             <rect
                               x={layout.canvasWidth / 2 - badgeW / 2}
@@ -4229,17 +4377,20 @@ export default function App() {
                               fill={isDark ? '#18181b' : '#ffffff'}
                               stroke={theme.pillBorder}
                               strokeWidth="1.2"
+                              strokeDasharray={item.isCollapsed ? '4 3' : undefined}
+                              strokeOpacity={item.isCollapsed ? 0.85 : 1}
                             />
                             <text
                               x={layout.canvasWidth / 2}
                               y={item.y + 4}
                               textAnchor="middle"
                               fill={theme.pillText}
+                              fillOpacity={item.isCollapsed ? 0.65 : 1}
                               fontSize="11"
-                              fontWeight="600"
+                              fontWeight={item.isCollapsed ? '500' : '600'}
                               fontFamily="Inter, system-ui, sans-serif"
                             >
-                              {item.label}
+                              {displayLabel}
                             </text>
                           </g>
                         );
@@ -4807,6 +4958,10 @@ export default function App() {
               <span className="hidden lg:inline opacity-40">•</span>
               <span className="hidden lg:inline">
                 <GripVertical className="w-3 h-3 inline" /> Drag columns to reorder
+              </span>
+              <span className="hidden xl:inline opacity-40">•</span>
+              <span className="hidden xl:inline">
+                <strong className="text-indigo-400">== Section ==</strong> collapses region
               </span>
             </div>
             <div className="font-mono text-[10px] opacity-75">
