@@ -103,15 +103,18 @@ async function main() {
   console.log('Building UMLens bundle for local preview...');
   runSync('npx', ['vite', 'build'], { GITHUB_ACTIONS: 'false' });
 
+  const viteBin = path.join(ROOT_DIR, 'node_modules', 'vite', 'bin', 'vite.js');
   const previewProc = spawn(
-    'npx',
-    ['vite', 'preview', '--port', String(PREVIEW_PORT), '--host', '127.0.0.1', '--strictPort'],
+    process.execPath,
+    [viteBin, 'preview', '--port', String(PREVIEW_PORT), '--host', '127.0.0.1', '--strictPort'],
     {
       cwd: ROOT_DIR,
-      stdio: 'pipe',
+      stdio: 'ignore',
+      detached: true,
       env: { ...process.env, GITHUB_ACTIONS: 'false' },
     }
   );
+  previewProc.unref();
 
   let browser;
   try {
@@ -247,12 +250,24 @@ async function main() {
     console.log(`Captured documentation media in ${path.relative(ROOT_DIR, MEDIA_DIR)}`);
   } finally {
     if (browser) await browser.close();
-    previewProc.kill('SIGTERM');
+    if (previewProc?.pid) {
+      try {
+        process.kill(-previewProc.pid, 'SIGKILL');
+      } catch {
+        try {
+          previewProc.kill('SIGKILL');
+        } catch {
+          // Already exited
+        }
+      }
+    }
     fs.rmSync(TMP_DIR, { recursive: true, force: true });
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
