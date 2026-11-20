@@ -236,8 +236,8 @@ async function main() {
     await page.waitForTimeout(250);
     fullFrames.push({ buffer: await page.screenshot(), duration: 1.5 });
 
-    await page.locator('button[title="Show Source Editor"]').click();
-    await page.locator('button[title="Close Inspector Drawer"]').click();
+    await page.locator('main button[title="Show Source Editor"]').click();
+    await page.locator('header button[title="Close Inspector Drawer"]').click();
     await page.waitForTimeout(250);
     fullFrames.push({ buffer: await page.screenshot(), duration: 0.9 });
 
