@@ -4,7 +4,7 @@ sequenceDiagram
   actor Ops as Warehouse Ops
 
   box rgba(99, 102, 241, 0.14) Order & Warehouse
-    participant OMS as Fulfillment Orchestrator
+    participant OMS as Fulfillment<br/>Orchestrator
     participant WMS@{ "type": "control", "alias": "Warehouse WMS" }
     participant Inv@{ "type": "database", "alias": "Stock Ledger" }
   end
@@ -18,7 +18,7 @@ sequenceDiagram
 
   %% @contract: Event: order.confirmed.v1 | Consumer Group: fulfillment-workers
   %% @question[open]: What is the dead-letter replay SLA if WMS is undergoing maintenance?
-  OMS->>+WMS: allocateWarehouse(orderId, skuList)
+  OMS->>+WMS: allocateWarehouse(<br/>orderId, skuList)
   WMS->>+Inv: decrementAvailableStock(skuList)
   Inv-->>-WMS: allocationToken("ALLOC-309")
   WMS<<->>Inv: reconcileBinLocks(skuList)
@@ -30,7 +30,7 @@ sequenceDiagram
       %% @contract: POST /carriers/v1/labels | Timeout: 2500ms | Format: ZPL
       %% @decision: Use async fallback queue if primary carrier API exceeds 2.5s
       create participant LabelWorker@{ "type": "control", "alias": "Label Worker" }
-      OMS->>+LabelWorker: renderZplPayload(orderId, weightOz)
+      OMS->>+LabelWorker: renderZplPayload(<br/>orderId, weightOz)
       LabelWorker->>+Carrier: requestShippingLabel(orderId, zpl)
       Carrier-->>-LabelWorker: trackingNumber("1Z999AA10123456784")
       LabelWorker-->>-OMS: labelArtifact(zplUrl)

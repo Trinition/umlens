@@ -16,7 +16,7 @@ end box
 
 box "Payments & Risk" #10b981
   control "Payment Service" as PaySvc
-  queue "Kafka Event Bus" as Kafka #a855f7
+  queue "Kafka\nEvent Bus" as Kafka #a855f7
 end box
 
 == Checkout & Fraud Check ==
@@ -26,7 +26,7 @@ end box
 Customer -> GW ++ : POST /api/v1/checkout
 
 ' @contract: gRPC OrderService.CreateOrder(cartId, paymentToken) | Timeout: 1200ms
-GW -> OrderSvc ++ : createOrder(cartId, paymentToken)
+GW -> OrderSvc ++ : createOrder(cartId,\npaymentToken)
 
 OrderSvc <-> OrdersDB : verifyIdempotencyLock(cartId)
 OrderSvc -> OrdersDB ++ : INSERT order (status=PENDING)
@@ -36,7 +36,7 @@ opt #0ea5e9 [High-Value Order > $500]
   ' @contract: Sync Risk Scoring | SLA: p99 < 180ms | Fallback: Soft-approve
   ' @decision: Run synchronous fraud check inline before card capture for orders > $500
   OrderSvc -[#f59e0b]> PaySvc ++ #f59e0b : runFraudRiskCheck(customerId, amount)
-  note right of PaySvc #f59e0b : Inline check < 180ms p99
+  note right of PaySvc #f59e0b : Inline risk check\nSLA < 180ms p99
   PaySvc -> PaySvc : evaluateVelocityRules()
   return riskScore: 12 (APPROVED)
 end

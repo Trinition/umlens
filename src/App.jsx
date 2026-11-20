@@ -68,7 +68,7 @@ end box
 
 box "Payments & Risk" #10b981
   control "Payment Service" as PaySvc
-  queue "Kafka Event Bus" as Kafka #a855f7
+  queue "Kafka\\nEvent Bus" as Kafka #a855f7
 end box
 
 == Checkout & Fraud Check ==
@@ -78,7 +78,7 @@ end box
 Customer -> GW ++ : POST /api/v1/checkout
 
 ' @contract: gRPC OrderService.CreateOrder(cartId, paymentToken) | Timeout: 1200ms
-GW -> OrderSvc ++ : createOrder(cartId, paymentToken)
+GW -> OrderSvc ++ : createOrder(cartId,\\npaymentToken)
 
 OrderSvc <-> OrdersDB : verifyIdempotencyLock(cartId)
 OrderSvc -> OrdersDB ++ : INSERT order (status=PENDING)
@@ -88,7 +88,7 @@ opt #0ea5e9 [High-Value Order > $500]
   ' @contract: Sync Risk Scoring | SLA: p99 < 180ms | Fallback: Soft-approve
   ' @decision: Run synchronous fraud check inline before card capture for orders > $500
   OrderSvc -[#f59e0b]> PaySvc ++ #f59e0b : runFraudRiskCheck(customerId, amount)
-  note right of PaySvc #f59e0b : Inline check < 180ms p99
+  note right of PaySvc #f59e0b : Inline risk check\\nSLA < 180ms p99
   PaySvc -> PaySvc : evaluateVelocityRules()
   return riskScore: 12 (APPROVED)
 end
@@ -140,7 +140,7 @@ GW --> Customer -- : Render Order Confirmation
   actor Ops as Warehouse Ops
 
   box rgba(99, 102, 241, 0.14) Order & Warehouse
-    participant OMS as Fulfillment Orchestrator
+    participant OMS as Fulfillment<br/>Orchestrator
     participant WMS@{ "type": "control", "alias": "Warehouse WMS" }
     participant Inv@{ "type": "database", "alias": "Stock Ledger" }
   end
@@ -154,7 +154,7 @@ GW --> Customer -- : Render Order Confirmation
 
   %% @contract: Event: order.confirmed.v1 | Consumer Group: fulfillment-workers
   %% @question[open]: What is the dead-letter replay SLA if WMS is undergoing maintenance?
-  OMS->>+WMS: allocateWarehouse(orderId, skuList)
+  OMS->>+WMS: allocateWarehouse(<br/>orderId, skuList)
   WMS->>+Inv: decrementAvailableStock(skuList)
   Inv-->>-WMS: allocationToken("ALLOC-309")
   WMS<<->>Inv: reconcileBinLocks(skuList)
@@ -166,7 +166,7 @@ GW --> Customer -- : Render Order Confirmation
       %% @contract: POST /carriers/v1/labels | Timeout: 2500ms | Format: ZPL
       %% @decision: Use async fallback queue if primary carrier API exceeds 2.5s
       create participant LabelWorker@{ "type": "control", "alias": "Label Worker" }
-      OMS->>+LabelWorker: renderZplPayload(orderId, weightOz)
+      OMS->>+LabelWorker: renderZplPayload(<br/>orderId, weightOz)
       LabelWorker->>+Carrier: requestShippingLabel(orderId, zpl)
       Carrier-->>-LabelWorker: trackingNumber("1Z999AA10123456784")
       LabelWorker-->>-OMS: labelArtifact(zplUrl)
@@ -221,6 +221,20 @@ const FRAGMENT_KEYWORDS = new Set([
   'critical',
   'group',
 ]);
+
+const UML_LINE_BREAK_RE = /<[bB][rR]\s*\/?>|\\[nlr]/g;
+
+function splitUmlLines(text) {
+  if (!text) return [];
+  return String(text)
+    .split(UML_LINE_BREAK_RE)
+    .map((line) => line.trim());
+}
+
+function flattenUmlLabel(text) {
+  if (!text) return '';
+  return String(text).replace(UML_LINE_BREAK_RE, ' ').replace(/\s+/g, ' ').trim();
+}
 
 /**
  * Automatically detects whether raw source text is PlantUML or Mermaid sequence syntax.
@@ -558,7 +572,7 @@ function parsePlantUML(sourceText) {
         getCurrentContainer().push(pendingNote);
         pendingNote = null;
       } else {
-        pendingNote.lines.push(raw);
+        pendingNote.lines.push(...splitUmlLines(raw));
       }
       continue;
     }
@@ -773,7 +787,7 @@ function parsePlantUML(sourceText) {
         placement,
         color: noteColor,
         participants: p2 ? [p1, p2] : [p1],
-        lines: inlineText !== undefined ? [inlineText] : [],
+        lines: inlineText !== undefined ? splitUmlLines(inlineText) : [],
       };
 
       if (inlineText !== undefined) {
@@ -1232,7 +1246,7 @@ function parseMermaid(sourceText) {
       ensureParticipant(p1);
       if (p2) ensureParticipant(p2);
 
-      const textLines = (noteMatch[4] || '').split(/<br\s*\/?>/i);
+      const textLines = splitUmlLines(noteMatch[4] || '');
       getCurrentContainer().push({
         type: 'note',
         id: `${getPathPrefix()}.note_${itemCounter++}`,
@@ -2221,7 +2235,9 @@ function computeSequenceLayout({
         }
 
         if (fromColId === toColId) {
-          const y = cursorY + 24;
+          const selfLines = splitUmlLines(node.label || 'self()');
+          const extraH = Math.max(0, selfLines.length - 1) * 14;
+          const y = cursorY + 24 + Math.floor(extraH / 2);
           renderItems.push({
             type: 'self_message',
             id: node.id,
@@ -2233,11 +2249,14 @@ function computeSequenceLayout({
           if (node.kind === 'return' && node.pairedCallId) {
             endActivation(toColId, y, node.pairedCallId);
           }
-          cursorY += LAYOUT.ROW_SELF_MESSAGE;
+          cursorY += LAYOUT.ROW_SELF_MESSAGE + extraH;
           continue;
         }
 
-        const y = cursorY + 28;
+        const msgText = node.label || (node.kind === 'return' ? 'return' : '');
+        const msgLines = splitUmlLines(msgText);
+        const extraH = Math.max(0, msgLines.length - 1) * 14;
+        const y = cursorY + 28 + extraH;
         renderItems.push({
           type: 'message',
           id: node.id,
@@ -2255,7 +2274,7 @@ function computeSequenceLayout({
           endActivation(fromColId, y, node.pairedCallId);
         }
 
-        cursorY += LAYOUT.ROW_MESSAGE;
+        cursorY += LAYOUT.ROW_MESSAGE + extraH;
       }
     }
   }
@@ -2573,9 +2592,10 @@ export default function App() {
   const [hoveredItem, setHoveredItem] = useState(null);
   const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
 
-  // Drag-and-Drop Column State
+  // Drag-and-Drop Column & File State
   const [draggedColId, setDraggedColId] = useState(null);
   const [dropTargetIndex, setDropTargetIndex] = useState(null);
+  const [isFileDragOver, setIsFileDragOver] = useState(false);
 
   const svgRef = useRef(null);
   const scrollContainerRef = useRef(null);
@@ -3100,6 +3120,53 @@ export default function App() {
     triggerToast('Exported diagram as SVG');
   };
 
+  const loadExternalDiagram = useCallback(
+    (text, label = null) => {
+      setSelectedPreset('custom');
+      setSourceCode(text);
+      setDialectMode('auto');
+      setCollapsedBoxIds(new Set());
+      setHiddenLifelines(new Set());
+      setFoldedCallIds(new Set());
+      setFoldedBranchIds(new Set());
+      setFoldedDividerIds(new Set());
+      setCustomLifelineOrder([]);
+      setIsStepMode(false);
+      setCurrentStep(1);
+      setSelectedMessageLine(null);
+      if (label) triggerToast(`Loaded ${label}`);
+    },
+    [triggerToast]
+  );
+
+  // PWA File Handling API ("Open With" / double-click / Dock drop) & global paste
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'launchQueue' in window) {
+      window.launchQueue.setConsumer(async (launchParams) => {
+        if (!launchParams.files?.length) return;
+        const fileHandle = launchParams.files[0];
+        const file = await fileHandle.getFile();
+        const text = await file.text();
+        loadExternalDiagram(text, file.name);
+      });
+    }
+
+    const handlePaste = (e) => {
+      const tag = document.activeElement?.tagName;
+      if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+      const text = e.clipboardData?.getData('text');
+      if (
+        text &&
+        (text.includes('@startuml') || text.includes('sequenceDiagram') || text.includes('->'))
+      ) {
+        loadExternalDiagram(text, 'diagram from clipboard');
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [loadExternalDiagram]);
+
   // Import .puml / .mmd / .md File
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0];
@@ -3107,21 +3174,44 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = (ev) => {
       if (typeof ev.target?.result === 'string') {
-        setSelectedPreset('custom');
-        setSourceCode(ev.target.result);
-        setDialectMode('auto');
-        setCollapsedBoxIds(new Set());
-        setHiddenLifelines(new Set());
-        setFoldedCallIds(new Set());
-        setFoldedBranchIds(new Set());
-        setFoldedDividerIds(new Set());
-        setCustomLifelineOrder([]);
-        setSelectedMessageLine(null);
-        triggerToast(`Loaded ${file.name}`);
+        loadExternalDiagram(ev.target.result, file.name);
       }
     };
     reader.readAsText(file);
     e.target.value = '';
+  };
+
+  // Drag-and-Drop File onto App Window
+  const isExternalFileDrag = (e) =>
+    !draggedColId && Array.from(e.dataTransfer?.types || []).includes('Files');
+
+  const handleWindowDragOver = (e) => {
+    if (!isExternalFileDrag(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (!isFileDragOver) setIsFileDragOver(true);
+  };
+
+  const handleWindowDragLeave = (e) => {
+    if (!isFileDragOver) return;
+    if (!e.relatedTarget || !e.currentTarget.contains(e.relatedTarget)) {
+      setIsFileDragOver(false);
+    }
+  };
+
+  const handleWindowDrop = (e) => {
+    if (!isExternalFileDrag(e)) return;
+    e.preventDefault();
+    setIsFileDragOver(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      if (typeof ev.target?.result === 'string') {
+        loadExternalDiagram(ev.target.result, file.name);
+      }
+    };
+    reader.readAsText(file);
   };
 
   const handleCanvasMouseMove = (e) => {
@@ -3154,7 +3244,12 @@ export default function App() {
   const headerTopHeight = hasVisibleBoxBanners ? 114 : 88;
 
   return (
-    <div className={`flex flex-col h-screen w-full overflow-hidden select-none ${theme.bgApp}`}>
+    <div
+      onDragOver={handleWindowDragOver}
+      onDragLeave={handleWindowDragLeave}
+      onDrop={handleWindowDrop}
+      className={`relative flex flex-col h-screen w-full overflow-hidden select-none ${theme.bgApp}`}
+    >
       {/* ==================================================================== */}
       {/* TOP APPLICATION HEADER BAR                                           */}
       {/* ==================================================================== */}
@@ -3946,9 +4041,24 @@ export default function App() {
                                   <StereotypeIcon kind={col.kind} className="w-3.5 h-3.5" />
                                 </div>
                                 <div className="min-w-0">
-                                  <div className="text-xs font-semibold truncate leading-tight" title={col.label}>
-                                    {col.label}
-                                  </div>
+                                  {(() => {
+                                    const labelLines = splitUmlLines(col.label);
+                                    const isMulti = labelLines.length > 1;
+                                    return (
+                                      <div
+                                        className={`${
+                                          isMulti ? 'text-[10.5px] leading-[1.15]' : 'text-xs leading-tight'
+                                        } font-semibold`}
+                                        title={flattenUmlLabel(col.label)}
+                                      >
+                                        {labelLines.slice(0, 2).map((lineText, lIdx) => (
+                                          <div key={lIdx} className="truncate">
+                                            {lineText}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    );
+                                  })()}
                                   <div
                                     className={`text-[9px] font-mono uppercase tracking-wider truncate ${theme.textSubtle}`}
                                   >
@@ -4579,7 +4689,8 @@ export default function App() {
                       // 5e. Hidden Lifeline Directional Stub Pill
                       if (item.type === 'hidden_stub') {
                         const dirSymbol = item.direction === 'outgoing' ? '→' : '←';
-                        const rawText = `${dirSymbol} [${item.hiddenLabel}] ${item.node.label || 'msg'}`;
+                        const flatMsgLabel = flattenUmlLabel(item.node.label) || 'msg';
+                        const rawText = `${dirSymbol} [${flattenUmlLabel(item.hiddenLabel)}] ${flatMsgLabel}`;
                         const displayText = rawText.length > 34 ? `${rawText.slice(0, 33)}…` : rawText;
                         const pillW = Math.min(230, Math.max(110, displayText.length * 6.3 + 22));
                         const stubLineLen = 14;
@@ -4655,9 +4766,12 @@ export default function App() {
                         if (hiddenSteps > 0) metaParts.push(`+${hiddenSteps} steps`);
                         if (hiddenFrags > 0) metaParts.push(`${hiddenFrags} block`);
                         const metaBadge = metaParts.length > 0 ? ` [${metaParts.join(', ')}]` : '';
-                        const returnSuffix = item.node.returnLabel ? `  ↩ ${item.node.returnLabel}` : '';
+                        const flatCallLabel = flattenUmlLabel(item.node.label) || 'call()';
+                        const returnSuffix = item.node.returnLabel
+                          ? `  ↩ ${flattenUmlLabel(item.node.returnLabel)}`
+                          : '';
 
-                        const fullLabel = `▸ ${item.node.label || 'call()'}${metaBadge}${returnSuffix}`;
+                        const fullLabel = `▸ ${flatCallLabel}${metaBadge}${returnSuffix}`;
                         const maxChars = Math.max(18, Math.floor((spanW - 18) / 6.3));
                         const clipped =
                           fullLabel.length > maxChars ? `${fullLabel.slice(0, maxChars - 1)}…` : fullLabel;
@@ -4668,7 +4782,7 @@ export default function App() {
                             onClick={() => toggleFoldCall(item.id)}
                             onMouseEnter={() =>
                               setHoveredItem({
-                                tooltip: `Collapsed Call Subtree: ${item.node.label}${metaBadge}${returnSuffix} (Click to expand)`,
+                                tooltip: `Collapsed Call Subtree: ${flatCallLabel}${metaBadge}${returnSuffix} (Click to expand)`,
                               })
                             }
                             onMouseLeave={() => setHoveredItem(null)}
@@ -4707,7 +4821,12 @@ export default function App() {
                         const loopH = 22;
                         const edgeX = getColumnEdgeX(colId, x, y, 'right');
                         const labelText = node.label || 'self()';
-                        const clipped = labelText.length > 26 ? `${labelText.slice(0, 25)}…` : labelText;
+                        const selfLines = splitUmlLines(labelText);
+                        const displaySelfLines = (selfLines.length > 0 ? selfLines : ['self()']).map(
+                          (ln) => (ln.length > 26 ? `${ln.slice(0, 25)}…` : ln)
+                        );
+                        const selfLineH = 14;
+                        const textStartY = y + 6 - Math.floor(((displaySelfLines.length - 1) * selfLineH) / 2);
                         const customMarkers = node.arrowColor
                           ? customArrowColors.get(node.arrowColor)
                           : null;
@@ -4726,7 +4845,9 @@ export default function App() {
                             onClick={() => handleSelectMessage(node)}
                             onMouseEnter={() =>
                               setHoveredItem({
-                                tooltip: `Step #${node.stepIndex} · ${node.from} → ${node.to}: ${labelText} (Click to inspect)`,
+                                tooltip: `Step #${node.stepIndex} · ${node.from} → ${node.to}: ${flattenUmlLabel(
+                                  labelText
+                                )} (Click to inspect)`,
                               })
                             }
                             onMouseLeave={() => setHoveredItem(null)}
@@ -4742,13 +4863,17 @@ export default function App() {
                             />
                             <text
                               x={edgeX + loopW + 8}
-                              y={y + 6}
+                              y={textStartY}
                               fill={isSelected ? '#38bdf8' : theme.pillText}
                               fontSize="11"
                               fontWeight={isSelected ? '700' : '500'}
                               fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                             >
-                              {clipped}
+                              {displaySelfLines.map((ln, idx) => (
+                                <tspan key={idx} x={edgeX + loopW + 8} dy={idx === 0 ? 0 : selfLineH}>
+                                  {ln}
+                                </tspan>
+                              ))}
                             </text>
                           </g>
                         );
@@ -4797,19 +4922,25 @@ export default function App() {
                         const spanDist = Math.abs(x2 - x1);
                         const numPrefix = node.autoNumber !== null ? `${node.autoNumber}. ` : '';
                         const foldPrefix = canFold ? '▾ ' : '';
-                        const rawLabel = `${foldPrefix}${numPrefix}${
-                          node.label || (isReturn ? 'return' : '')
-                        }`;
+                        const baseText = node.label || (isReturn ? 'return' : '');
+                        const parsedLines = splitUmlLines(baseText);
+                        const rawLines = (parsedLines.length > 0 ? parsedLines : ['']).map((ln, idx) =>
+                          idx === 0 ? `${foldPrefix}${numPrefix}${ln}` : ln
+                        );
                         const maxChars = Math.max(15, Math.floor((spanDist - 12) / 6.3));
-                        const displayLabel =
-                          rawLabel.length > maxChars
-                            ? `${rawLabel.slice(0, maxChars - 1)}…`
-                            : rawLabel;
+                        const displayLines = rawLines.map((ln) =>
+                          ln.length > maxChars ? `${ln.slice(0, maxChars - 1)}…` : ln
+                        );
+                        const hasVisibleLabel = displayLines.some((ln) => ln.length > 0);
+                        const maxLineLen = Math.max(1, ...displayLines.map((ln) => ln.length));
 
                         const pillW = Math.min(
                           Math.max(40, spanDist - 8),
-                          Math.max(40, displayLabel.length * 6.4 + 12)
+                          Math.max(40, maxLineLen * 6.4 + 12)
                         );
+                        const lineH = 14;
+                        const pillH = 19 + (displayLines.length - 1) * lineH;
+                        const pillY = y - 22 - (displayLines.length - 1) * lineH;
 
                         return (
                           <g
@@ -4818,7 +4949,7 @@ export default function App() {
                             onMouseEnter={() =>
                               setHoveredItem({
                                 tooltip: `Step #${node.stepIndex} (L${node.lineNum}) · ${node.from} → ${node.to}: ${
-                                  node.label || '(return)'
+                                  flattenUmlLabel(node.label) || '(return)'
                                 } — Click to inspect`,
                               })
                             }
@@ -4850,13 +4981,13 @@ export default function App() {
                             />
 
                             {/* Borderless Message Label Above Arrow (masks lifelines cleanly) */}
-                            {displayLabel && (
+                            {hasVisibleLabel && (
                               <g>
                                 <rect
                                   x={midX - pillW / 2}
-                                  y={y - 22}
+                                  y={pillY}
                                   width={pillW}
-                                  height="19"
+                                  height={pillH}
                                   rx="4"
                                   fill={
                                     isSelected
@@ -4872,7 +5003,7 @@ export default function App() {
                                 {canFold && (
                                   <rect
                                     x={midX - pillW / 2}
-                                    y={y - 22}
+                                    y={pillY}
                                     width="20"
                                     height="19"
                                     rx="4"
@@ -4889,7 +5020,7 @@ export default function App() {
 
                                 <text
                                   x={midX}
-                                  y={y - 9}
+                                  y={pillY + 13}
                                   textAnchor="middle"
                                   fill={
                                     isSelected
@@ -4908,7 +5039,11 @@ export default function App() {
                                   fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
                                   fontWeight={isSelected || canFold ? '600' : '500'}
                                 >
-                                  {displayLabel}
+                                  {displayLines.map((ln, idx) => (
+                                    <tspan key={idx} x={midX} dy={idx === 0 ? 0 : lineH}>
+                                      {ln}
+                                    </tspan>
+                                  ))}
                                 </text>
                               </g>
                             )}
@@ -5071,13 +5206,15 @@ export default function App() {
                   </div>
 
                   <div
-                    className={`font-mono text-[11px] p-2 rounded-lg border break-all ${
+                    className={`font-mono text-[11px] p-2 rounded-lg border break-words whitespace-pre-line ${
                       isDark
                         ? 'bg-zinc-900 border-zinc-800 text-zinc-200'
                         : 'bg-white border-slate-200 text-slate-800'
                     }`}
                   >
-                    {selectedMessage.label || '(return)'}
+                    {selectedMessage.label
+                      ? splitUmlLines(selectedMessage.label).join('\n')
+                      : '(return)'}
                   </div>
 
                   {selectedMessage.kind === 'call' && selectedMessage.hasFoldableChildren && (
@@ -5302,33 +5439,16 @@ export default function App() {
           <span>{toastMessage}</span>
         </div>
       )}
+
+      {isFileDragOver && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/75 backdrop-blur-xs pointer-events-none">
+          <div className="flex flex-col items-center gap-2 px-8 py-6 rounded-2xl border-2 border-dashed border-indigo-400 bg-zinc-900/95 text-zinc-100 shadow-2xl">
+            <Upload className="w-7 h-7 text-indigo-400" />
+            <p className="text-sm font-semibold">Drop sequence diagram to open</p>
+            <p className="text-xs text-zinc-400">Supports .puml, .plantuml, .iuml, .mmd, .mermaid</p>
+          </div>
+        </div>
+      )}
     </div>
   );
-
-  // Add inside your App component in src/App.jsx
-  useEffect(() => {
-    // 1. Handle OS double-click / "Open With" via PWA File Handling API
-    if ('launchQueue' in window) {
-      window.launchQueue.setConsumer(async (launchParams) => {
-        if (!launchParams.files?.length) return;
-        const fileHandle = launchParams.files[0];
-        const file = await fileHandle.getFile();
-        const text = await file.text();
-        setCode(text);
-      });
-    }
-
-    // 2. Handle global paste (when not typing in the editor or an input)
-    const handlePaste = (e) => {
-      const tag = document.activeElement?.tagName;
-      if (tag === 'TEXTAREA' || tag === 'INPUT') return;
-      const text = e.clipboardData?.getData('text');
-      if (text && (text.includes('@startuml') || text.includes('sequenceDiagram') || text.includes('->'))) {
-        setCode(text);
-      }
-    };
-
-    window.addEventListener('paste', handlePaste);
-    return () => window.removeEventListener('paste', handlePaste);
-  }, []);
 }
