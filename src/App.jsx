@@ -1571,7 +1571,6 @@ const LAYOUT = {
   ROW_NOTE: 54,
   FRAG_HEADER_H: 30,
   FRAG_ELSE_H: 28,
-  FRAG_COLLAPSED_BRANCH_H: 34,
   FRAG_BOTTOM_PAD: 14,
 };
 
@@ -1956,9 +1955,7 @@ function computeSequenceLayout({
           });
 
           if (isBranchFolded) {
-            cursorY +=
-              (b === 0 ? LAYOUT.FRAG_HEADER_H : LAYOUT.FRAG_ELSE_H) +
-              LAYOUT.FRAG_COLLAPSED_BRANCH_H;
+            cursorY += b === 0 ? 28 : 26;
           } else {
             cursorY += (b === 0 ? LAYOUT.FRAG_HEADER_H : LAYOUT.FRAG_ELSE_H) + 8;
             layoutNodes(branch.children, nestingDepth + 1);
@@ -1968,7 +1965,9 @@ function computeSequenceLayout({
           }
         }
 
-        const fragBottomY = cursorY + LAYOUT.FRAG_BOTTOM_PAD;
+        const lastBranch = node.branches[node.branches.length - 1];
+        const isLastBranchFolded = lastBranch ? foldedBranchIds.has(lastBranch.id) : false;
+        const fragBottomY = cursorY + (isLastBranchFolded ? 2 : LAYOUT.FRAG_BOTTOM_PAD);
         cursorY = fragBottomY + 8;
 
         renderItems.push({
@@ -3982,7 +3981,7 @@ export default function App() {
                       .filter((item) => item.type === 'fragment')
                       .map((frag) => {
                         const width = Math.max(140, frag.rightX - frag.leftX);
-                        const height = Math.max(36, frag.bottomY - frag.topY);
+                        const height = Math.max(28, frag.bottomY - frag.topY);
                         const fragBackdropFill = frag.color
                           ? applyAlphaToColor(frag.color, 0.08)
                           : theme.fragFill;
@@ -4071,7 +4070,7 @@ export default function App() {
                       .filter((item) => item.type === 'fragment')
                       .map((frag) => {
                         const width = Math.max(140, frag.rightX - frag.leftX);
-                        const height = Math.max(36, frag.bottomY - frag.topY);
+                        const height = Math.max(28, frag.bottomY - frag.topY);
                         const frameStroke = frag.color || theme.fragStroke;
                         return (
                           <g key={`hdr_${frag.id}`}>
@@ -4100,6 +4099,10 @@ export default function App() {
                                 : theme.fragTagFill;
                               const tagStroke = branchColor || theme.fragStroke;
                               const tagTextFill = branchColor ? theme.pillText : theme.fragTagText;
+                              const hitW = Math.min(
+                                width,
+                                tagW + 18 + (displayCond ? displayCond.length * 6.4 : 0)
+                              );
 
                               return (
                                 <g key={bh.branchId}>
@@ -4120,14 +4123,24 @@ export default function App() {
                                   >
                                     <title>
                                       {bh.isFolded
-                                        ? `Expand [${tagText}] ${condText}`
+                                        ? `Expand [${tagText}] ${condText} (${bh.stepCount} ${
+                                            bh.stepCount === 1 ? 'item' : 'items'
+                                          } hidden)`
                                         : `Collapse [${tagText}] ${condText}`}
                                     </title>
+                                    <rect
+                                      x={frag.leftX}
+                                      y={bh.y}
+                                      width={hitW}
+                                      height="22"
+                                      fill="transparent"
+                                    />
                                     <path
                                       d={`M ${frag.leftX} ${bh.y} H ${frag.leftX + tagW} L ${
                                         frag.leftX + tagW + 8
                                       } ${bh.y + 11} L ${frag.leftX + tagW} ${bh.y + 22} H ${frag.leftX} Z`}
                                       fill={tagFill}
+                                      fillOpacity={bh.isFolded ? 0.72 : 1}
                                       stroke={tagStroke}
                                       strokeWidth="1"
                                     />
@@ -4157,39 +4170,13 @@ export default function App() {
                                         x={frag.leftX + tagW + 14}
                                         y={bh.y + 15}
                                         fill={tagTextFill}
+                                        fillOpacity={bh.isFolded ? 0.52 : 1}
                                         fontSize="10.5"
                                         fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-                                        fontWeight="600"
+                                        fontWeight={bh.isFolded ? '500' : '600'}
                                       >
                                         {displayCond}
                                       </text>
-                                    )}
-
-                                    {bh.isFolded && (
-                                      <g>
-                                        <rect
-                                          x={frag.leftX + 14}
-                                          y={bh.y + 27}
-                                          width={Math.max(120, width - 28)}
-                                          height="22"
-                                          rx="6"
-                                          fill={blendWithBg(tagStroke, theme.svgBg, isDark ? 0.2 : 0.12)}
-                                          stroke={tagStroke}
-                                          strokeDasharray="3 3"
-                                          strokeWidth="1"
-                                        />
-                                        <text
-                                          x={frag.leftX + width / 2}
-                                          y={bh.y + 41}
-                                          textAnchor="middle"
-                                          fill={tagTextFill}
-                                          fontSize="10.5"
-                                          fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
-                                        >
-                                          ▸ Branch folded ({bh.stepCount}{' '}
-                                          {bh.stepCount === 1 ? 'item' : 'items'} hidden — click to expand)
-                                        </text>
-                                      </g>
                                     )}
                                   </g>
                                 </g>

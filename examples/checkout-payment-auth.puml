@@ -1,0 +1,77 @@
+@startuml CheckoutAndPaymentAuth
+title Checkout & Payment Authorization Flow
+autonumber
+
+actor Customer
+
+box "Edge & Experience" #0ea5e9
+  boundary "API Gateway" as GW
+end box
+
+box "Core Commerce" #6366f1
+  control "Order Service" as OrderSvc
+  database "Orders DB" as OrdersDB #10b981
+  control "Inventory Service" as InvSvc
+end box
+
+box "Payments & Risk" #10b981
+  control "Payment Service" as PaySvc
+  queue "Kafka Event Bus" as Kafka #a855f7
+end box
+
+== Checkout & Fraud Check ==
+
+' @contract: POST /api/v1/checkout | Auth: Bearer JWT | Idempotency-Key required
+' @question[open]: Should edge rate-limiting enforce 10 req/min per customerId or IP?
+Customer -> GW ++ : POST /api/v1/checkout
+
+' @contract: gRPC OrderService.CreateOrder(cartId, paymentToken) | Timeout: 1200ms
+GW -> OrderSvc ++ : createOrder(cartId, paymentToken)
+
+OrderSvc <-> OrdersDB : verifyIdempotencyLock(cartId)
+OrderSvc -> OrdersDB ++ : INSERT order (status=PENDING)
+OrdersDB --> OrderSvc -- : orderId: "ORD-9042"
+
+opt #0ea5e9 [High-Value Order > $500]
+  ' @contract: Sync Risk Scoring | SLA: p99 < 180ms | Fallback: Soft-approve
+  ' @decision: Run synchronous fraud check inline before card capture for orders > $500
+  OrderSvc -[#f59e0b]> PaySvc ++ #f59e0b : runFraudRiskCheck(customerId, amount)
+  note right of PaySvc #f59e0b : Inline check < 180ms p99
+  PaySvc -> PaySvc : evaluateVelocityRules()
+  return riskScore: 12 (APPROVED)
+end
+
+== Payment & Stock Reservation ==
+
+' @contract: POST /internal/v2/payments/authorize | Retry: None (non-idempotent)
+' @question[resolved]: Which gateway handles 3DS2 challenge redirects? -> Delegated to PaySvc token vault
+OrderSvc -> PaySvc ++ : authorizeAndCapture(orderId, amount)
+
+alt [Payment Method == Card]
+  PaySvc -> OrdersDB ++ : fetchSavedCardToken(customerId)
+  OrdersDB --> PaySvc -- : tok_visa_4242
+  PaySvc -> PaySvc : chargeCardGateway(tok_visa_4242)
+else #ec4899 [Payment Method == Digital Wallet]
+  PaySvc -> PaySvc : verifyApplePayCryptogram()
+  PaySvc -\ Kafka : publish("wallet.auth.audit")
+end
+
+PaySvc --> OrderSvc -- : paymentReceipt(txId="TX-771")
+
+loop [Retry up to 3x on Lock Contention]
+  OrderSvc -> InvSvc ++ : reserveStock(orderId, lineItems)
+  InvSvc -> OrdersDB ++ : SELECT FOR UPDATE stock_ledger
+  OrdersDB --> InvSvc -- : rowsLocked
+  InvSvc --> OrderSvc -- : reservationConfirmed
+end
+
+OrderSvc -> OrdersDB ++ : UPDATE order SET status=CONFIRMED
+OrdersDB --> OrderSvc -- : updated(1)
+
+' @contract: Topic: order.confirmed.v1 | Schema: Avro v3 | PartitionKey: orderId
+OrderSvc -[#a855f7]\ Kafka : publish("order.confirmed.v1")
+Kafka -\ InvSvc : consume("order.confirmed.v1")
+
+OrderSvc --> GW -- : 201 Created { orderId, txId }
+GW --> Customer -- : Render Order Confirmation
+@enduml

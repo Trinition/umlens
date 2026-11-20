@@ -1,0 +1,60 @@
+sequenceDiagram
+  title Order Fulfillment Pipeline
+  autonumber 1 1
+  actor Ops as Warehouse Ops
+
+  box rgba(99, 102, 241, 0.14) Order & Warehouse
+    participant OMS as Fulfillment Orchestrator
+    participant WMS@{ "type": "control", "alias": "Warehouse WMS" }
+    participant Inv@{ "type": "database", "alias": "Stock Ledger" }
+  end
+
+  box rgba(16, 185, 129, 0.14) Logistics & Comms
+    participant Carrier@{ "type": "boundary", "alias": "Carrier Gateway" }
+    participant Notify@{ "type": "queue", "alias": "Notification Hub" }
+  end
+
+  link Carrier: Carrier API Docs @ https://carriers.example.com/v1
+
+  %% @contract: Event: order.confirmed.v1 | Consumer Group: fulfillment-workers
+  %% @question[open]: What is the dead-letter replay SLA if WMS is undergoing maintenance?
+  OMS->>+WMS: allocateWarehouse(orderId, skuList)
+  WMS->>+Inv: decrementAvailableStock(skuList)
+  Inv-->>-WMS: allocationToken("ALLOC-309")
+  WMS<<->>Inv: reconcileBinLocks(skuList)
+  WMS-->>-OMS: warehouseAssigned("US-EAST-2")
+
+  rect rgba(56, 189, 248, 0.08)
+    Note over OMS,Carrier: Phase 2 — Parallel Label Generation & Dispatch<br/>SLA Target: < 2.5s
+    par Generate Shipping Label
+      %% @contract: POST /carriers/v1/labels | Timeout: 2500ms | Format: ZPL
+      %% @decision: Use async fallback queue if primary carrier API exceeds 2.5s
+      create participant LabelWorker@{ "type": "control", "alias": "Label Worker" }
+      OMS->>+LabelWorker: renderZplPayload(orderId, weightOz)
+      LabelWorker->>+Carrier: requestShippingLabel(orderId, zpl)
+      Carrier-->>-LabelWorker: trackingNumber("1Z999AA10123456784")
+      LabelWorker-->>-OMS: labelArtifact(zplUrl)
+      destroy LabelWorker
+    and Send Dispatch Notice
+      OMS-)Notify: emit("shipment.label.created")
+      Notify-)Ops: pushPickListAlert("US-EAST-2")
+    end
+  end
+
+  alt International Customs Required
+    %% @question[resolved]: Which HS tariff lookup table is authoritative? -> TradeCompliance v3
+    OMS->>+Carrier: submitCommercialInvoice(orderId, hsCodes)
+    Carrier-->>-OMS: customsClearanceId("CUST-882")
+  else Domestic Ground Shipment
+    OMS->>OMS: attachStandardManifest()
+  end
+
+  critical Carrier Pickup Cutoff
+    %% @contract: POST /wms/v1/pick-waves | Idempotent via allocationToken
+    OMS->>+WMS: releasePickWave(allocationToken, trackingNumber)
+    WMS-->>-OMS: waveQueued(waveId="W-44")
+  option Cutoff Window Missed
+    Carrier--xOMS: pickupWindowExpired(nextSlot="06:00")
+  end
+
+  OMS-)Notify: emit("order.fulfillment.ready")
