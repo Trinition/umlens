@@ -8,7 +8,8 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "icons": "bash scripts/generate-icons.sh"
+    "icons": "bash scripts/generate-icons.sh",
+    "docs:capture": "node scripts/capture-docs.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.76.0",
