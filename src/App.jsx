@@ -4290,6 +4290,7 @@ export default function App() {
                                       width={hitW}
                                       height="22"
                                       fill="transparent"
+                                      pointerEvents="all"
                                     />
                                     <path
                                       d={`M ${frag.leftX} ${bh.y} H ${frag.leftX + tagW} L ${
@@ -4832,6 +4833,7 @@ export default function App() {
                               y2={y}
                               stroke="transparent"
                               strokeWidth="16"
+                              pointerEvents="stroke"
                             />
 
                             {/* Visible Horizontal Message Arrow */}
@@ -4875,6 +4877,7 @@ export default function App() {
                                     height="19"
                                     rx="4"
                                     fill="transparent"
+                                    pointerEvents="all"
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       toggleFoldCall(node.id);

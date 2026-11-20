@@ -139,8 +139,8 @@ async function main() {
     // 1. Hero Workspace Screenshot (3-pane view with Inspector open)
     console.log('Capturing hero-workspace.png...');
     await resetWorkspace({ collapseSource: false });
-    await page.locator('svg g.cursor-pointer').filter({ hasText: 'POST /api/v1/checkout' }).first().click();
-    await page.waitForTimeout(250);
+    await page.locator('svg g.cursor-pointer text').filter({ hasText: 'POST /api/v1/checkout' }).first().click();
+    await page.locator('aside').filter({ hasText: 'Arrow & Review Inspector' }).waitFor({ state: 'visible', timeout: 5000 });
     await page.locator('button[title="Fit Diagram Width"]').click();
     await page.waitForTimeout(250);
     await page.screenshot({ path: path.join(MEDIA_DIR, 'hero-workspace.png') });
@@ -232,7 +232,8 @@ async function main() {
     await page.waitForTimeout(250);
     fullFrames.push({ buffer: await page.screenshot(), duration: 1.1 });
 
-    await page.locator('svg g.cursor-pointer').filter({ hasText: 'POST /api/v1/checkout' }).first().click();
+    await page.locator('svg g.cursor-pointer text').filter({ hasText: 'POST /api/v1/checkout' }).first().click();
+    await page.locator('aside').filter({ hasText: 'Arrow & Review Inspector' }).waitFor({ state: 'visible', timeout: 5000 });
     await page.waitForTimeout(250);
     fullFrames.push({ buffer: await page.screenshot(), duration: 1.5 });
 
