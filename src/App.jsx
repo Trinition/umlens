@@ -3364,48 +3364,62 @@ export default function App() {
                 <span>{activeDialect === 'mermaid' ? 'Mermaid (.mmd)' : 'PlantUML (.puml)'}</span>
               </div>
 
-              <div className="relative">
-                <button
-                  onClick={() => setShowSyntaxHelp((v) => !v)}
-                  className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded border transition cursor-pointer ${theme.btnGhost}`}
-                >
-                  <HelpCircle className="w-3 h-3" />
-                  <span>Syntax</span>
-                </button>
-
-                {showSyntaxHelp && (
-                  <div
-                    className={`absolute right-0 mt-1.5 w-80 p-3 rounded-xl border shadow-xl z-50 text-xs select-text ${
-                      isDark
-                        ? 'bg-zinc-900 border-zinc-700 text-zinc-200'
-                        : 'bg-white border-slate-200 text-slate-800'
-                    }`}
+              <div className="flex items-center gap-1.5">
+                <div className="relative">
+                  <button
+                    onClick={() => setShowSyntaxHelp((v) => !v)}
+                    className={`flex items-center gap-1 text-[11px] px-2 py-1 rounded border transition cursor-pointer ${theme.btnGhost}`}
                   >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-semibold">Dual-Syntax Reference</span>
-                      <button onClick={() => setShowSyntaxHelp(false)} className="p-0.5 opacity-70 hover:opacity-100">
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                    <div className="space-y-2 font-mono text-[10.5px]">
-                      <div className="p-2 rounded bg-indigo-500/10 border border-indigo-500/20">
-                        <div className="font-bold text-indigo-400 mb-0.5">PlantUML (.puml)</div>
-                        box &quot;Team&quot; #0ea5e9 ... end box
-                        <br />A -&gt; B ++ : syncCall() / return Result
-                        <br />alt / else / opt / loop / par / end
-                        <br />&apos; @contract: ... | &apos; @question[open]: ...
+                    <HelpCircle className="w-3 h-3" />
+                    <span>Syntax</span>
+                  </button>
+
+                  {showSyntaxHelp && (
+                    <div
+                      className={`absolute right-0 mt-1.5 w-80 p-3 rounded-xl border shadow-xl z-50 text-xs select-text ${
+                        isDark
+                          ? 'bg-zinc-900 border-zinc-700 text-zinc-200'
+                          : 'bg-white border-slate-200 text-slate-800'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="font-semibold">Dual-Syntax Reference</span>
+                        <button onClick={() => setShowSyntaxHelp(false)} className="p-0.5 opacity-70 hover:opacity-100">
+                          <X className="w-3.5 h-3.5" />
+                        </button>
                       </div>
-                      <div className="p-2 rounded bg-emerald-500/10 border border-emerald-500/20">
-                        <div className="font-bold text-emerald-400 mb-0.5">Mermaid (.mmd)</div>
-                        sequenceDiagram / box rgba(...) Team ... end
-                        <br />A-&gt;&gt;+B: call / B--&gt;&gt;-A: ret / A&lt;&lt;-&gt;&gt;B: bidir
-                        <br />create / destroy / participant X@&#123;&quot;type&quot;:&quot;database&quot;&#125;
-                        <br />rect rgba(...) ... end | par ... and ... end
-                        <br />%% @contract: ... | %% @decision: ...
+                      <div className="space-y-2 font-mono text-[10.5px]">
+                        <div className="p-2 rounded bg-indigo-500/10 border border-indigo-500/20">
+                          <div className="font-bold text-indigo-400 mb-0.5">PlantUML (.puml)</div>
+                          box &quot;Team&quot; #0ea5e9 ... end box
+                          <br />A -&gt; B ++ : syncCall() / return Result
+                          <br />alt / else / opt / loop / par / end
+                          <br />&apos; @contract: ... | &apos; @question[open]: ...
+                        </div>
+                        <div className="p-2 rounded bg-emerald-500/10 border border-emerald-500/20">
+                          <div className="font-bold text-emerald-400 mb-0.5">Mermaid (.mmd)</div>
+                          sequenceDiagram / box rgba(...) Team ... end
+                          <br />A-&gt;&gt;+B: call / B--&gt;&gt;-A: ret / A&lt;&lt;-&gt;&gt;B: bidir
+                          <br />create / destroy / participant X@&#123;&quot;type&quot;:&quot;database&quot;&#125;
+                          <br />rect rgba(...) ... end | par ... and ... end
+                          <br />%% @contract: ... | %% @decision: ...
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
+
+                <button
+                  onClick={() => {
+                    setShowSyntaxHelp(false);
+                    setIsEditorOpen(false);
+                  }}
+                  title="Collapse Source Panel"
+                  aria-label="Collapse Source Panel"
+                  className={`p-1 rounded border transition cursor-pointer ${theme.btnGhost}`}
+                >
+                  <PanelLeftClose className="w-3.5 h-3.5" />
+                </button>
               </div>
             </div>
 
@@ -3489,6 +3503,18 @@ export default function App() {
             }`}
           >
             <div className="flex flex-wrap items-center gap-2">
+              {!isEditorOpen && (
+                <button
+                  onClick={() => setIsEditorOpen(true)}
+                  title="Show Source Editor"
+                  aria-label="Show Source Editor"
+                  className={`flex items-center gap-1 text-[11px] font-medium px-2 py-1 rounded-md border transition cursor-pointer ${theme.btnGhost}`}
+                >
+                  <PanelLeftOpen className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Source</span>
+                </button>
+              )}
+
               {/* Group Collapse / Expand Toggle (when `box` groups exist) */}
               {hasBoxSwimlanes && (
                 <div
