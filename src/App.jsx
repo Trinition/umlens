@@ -397,6 +397,67 @@ function consumePendingMeta(pendingMeta) {
   return snapshot;
 }
 
+function formatAutoNumberValue(num, formatStr) {
+  if (!formatStr) return `${num}.`;
+  const clean = formatStr.replace(/<[^>]+>/g, '').trim();
+  if (!clean) return `${num}.`;
+  if (/0+/.test(clean)) {
+    return clean.replace(/0+/, (zeros) => String(num).padStart(zeros.length, '0'));
+  }
+  if (/#+/.test(clean)) {
+    return clean.replace(/#+/, () => String(num));
+  }
+  return `${clean} ${num}`.trim();
+}
+
+function applyAutoNumberDirective(raw, state) {
+  let rest = raw.replace(/^autonumber\b/i, '').trim();
+  if (!rest) {
+    state.enabled = true;
+    return;
+  }
+
+  const fmtMatch = rest.match(/"([^"]*)"|'([^']*)'/);
+  if (fmtMatch) {
+    state.format = fmtMatch[1] ?? fmtMatch[2] ?? '';
+    rest = `${rest.slice(0, fmtMatch.index)} ${rest.slice(fmtMatch.index + fmtMatch[0].length)}`.trim();
+  }
+
+  if (/^(stop|off)\b/i.test(rest)) {
+    state.enabled = false;
+    return;
+  }
+
+  if (/^(resume|on)\b/i.test(rest)) {
+    state.enabled = true;
+    rest = rest.replace(/^(resume|on)\b/i, '').trim();
+  } else {
+    state.enabled = true;
+  }
+
+  const nums = rest.match(/\d+/g);
+  if (nums && nums.length >= 1) {
+    state.counter = parseInt(nums[0], 10);
+    if (nums.length >= 2) {
+      state.step = parseInt(nums[1], 10) || 1;
+    }
+  }
+}
+
+function nextAutoNumberInfo(state) {
+  if (!state.enabled) return { autoNumber: null, autoNumberLabel: null };
+  const current = state.counter;
+  const label = formatAutoNumberValue(current, state.format);
+  state.counter += state.step || 1;
+  return { autoNumber: current, autoNumberLabel: label };
+}
+
+function getAutoNumberPrefix(node) {
+  if (node?.autoNumberLabel) return `${node.autoNumberLabel} `;
+  if (node?.autoNumber !== null && node?.autoNumber !== undefined) return `${node.autoNumber}. `;
+  return '';
+}
+
 // ----------------------------------------------------------------------------
 // 2A. PLANTUML SEQUENCE PARSER -> UNIFIED AST
 // ----------------------------------------------------------------------------
@@ -510,8 +571,7 @@ function parsePlantUML(sourceText) {
   const boxesMap = new Map();
   const warnings = [];
   let title = '';
-  let autoNumberEnabled = false;
-  let autoNumberCounter = 1;
+  const autoNumberState = { enabled: false, counter: 1, step: 1, format: null };
   let currentBox = null;
 
   const ensureParticipant = (id) => {
@@ -636,15 +696,9 @@ function parsePlantUML(sourceText) {
       continue;
     }
 
-    // Autonumber
-    const autoNumMatch = raw.match(/^autonumber(?:\s+(\d+))?(?:\s+(stop|resume))?$/i);
-    if (autoNumMatch) {
-      if (autoNumMatch[2]?.toLowerCase() === 'stop') {
-        autoNumberEnabled = false;
-      } else {
-        autoNumberEnabled = true;
-        if (autoNumMatch[1]) autoNumberCounter = parseInt(autoNumMatch[1], 10);
-      }
+    // Autonumber (supports: autonumber, autonumber 10, autonumber 1 1, autonumber "<b>[000]", stop/resume)
+    if (/^autonumber\b/i.test(raw)) {
+      applyAutoNumberDirective(raw, autoNumberState);
       continue;
     }
 
@@ -802,12 +856,14 @@ function parsePlantUML(sourceText) {
     const returnMatch = raw.match(/^return(?:\s+(.*))?$/i);
     if (returnMatch) {
       const metadata = consumePendingMeta(pendingMeta);
+      const { autoNumber, autoNumberLabel } = nextAutoNumberInfo(autoNumberState);
       getCurrentContainer().push({
         type: 'return_cmd',
         id: `${getPathPrefix()}.msg_${itemCounter++}`,
         lineNum,
         label: (returnMatch[1] || '').trim(),
-        autoNumber: autoNumberEnabled ? autoNumberCounter++ : null,
+        autoNumber,
+        autoNumberLabel,
         metadata,
       });
       continue;
@@ -819,6 +875,7 @@ function parsePlantUML(sourceText) {
       const fromP = ensureParticipant(parsedMsg.from);
       const toP = ensureParticipant(parsedMsg.to);
       const metadata = consumePendingMeta(pendingMeta);
+      const { autoNumber, autoNumberLabel } = nextAutoNumberInfo(autoNumberState);
 
       getCurrentContainer().push({
         type: 'message',
@@ -827,7 +884,8 @@ function parsePlantUML(sourceText) {
         ...parsedMsg,
         toKind: toP.kind,
         fromKind: fromP.kind,
-        autoNumber: autoNumberEnabled ? autoNumberCounter++ : null,
+        autoNumber,
+        autoNumberLabel,
         metadata,
       });
       continue;
@@ -957,9 +1015,7 @@ function parseMermaid(sourceText) {
   const boxesMap = new Map();
   const warnings = [];
   let title = '';
-  let autoNumberEnabled = false;
-  let autoNumberCounter = 1;
-  let autoNumberStep = 1;
+  const autoNumberState = { enabled: false, counter: 1, step: 1, format: null };
   let currentBox = null;
 
   const ensureParticipant = (id) => {
@@ -1027,18 +1083,9 @@ function parseMermaid(sourceText) {
       continue;
     }
 
-    // Autonumber (supports: autonumber | autonumber off | autonumber <start> [step])
+    // Autonumber (supports: autonumber | autonumber off | autonumber <start> [step] | format strings)
     if (/^autonumber\b/i.test(raw)) {
-      if (/^autonumber\s+off\b/i.test(raw)) {
-        autoNumberEnabled = false;
-      } else {
-        autoNumberEnabled = true;
-        const numMatch = raw.match(/^autonumber\s+(\d+)(?:\s+(\d+))?/i);
-        if (numMatch) {
-          autoNumberCounter = parseInt(numMatch[1], 10);
-          autoNumberStep = numMatch[2] ? parseInt(numMatch[2], 10) || 1 : 1;
-        }
-      }
+      applyAutoNumberDirective(raw, autoNumberState);
       continue;
     }
 
@@ -1264,11 +1311,7 @@ function parseMermaid(sourceText) {
       const fromP = ensureParticipant(parsedMsg.from);
       const toP = ensureParticipant(parsedMsg.to);
       const metadata = consumePendingMeta(pendingMeta);
-      let nextAutoNum = null;
-      if (autoNumberEnabled) {
-        nextAutoNum = autoNumberCounter;
-        autoNumberCounter += autoNumberStep;
-      }
+      const { autoNumber, autoNumberLabel } = nextAutoNumberInfo(autoNumberState);
 
       getCurrentContainer().push({
         type: 'message',
@@ -1277,7 +1320,8 @@ function parseMermaid(sourceText) {
         ...parsedMsg,
         toKind: toP.kind,
         fromKind: fromP.kind,
-        autoNumber: nextAutoNum,
+        autoNumber,
+        autoNumberLabel,
         metadata,
       });
       continue;
@@ -1313,6 +1357,35 @@ function finalizeUnifiedAST({
   const callStack = [];
   const allNodesById = new Map();
   const orderedSteps = [];
+  let hasExplicitActivations = false;
+  const explicitActivationStacks = new Map();
+  let lastFlowNode = null;
+  let lastReturnClosedTarget = null;
+
+  const pushExplicitActivation = (target, entry) => {
+    hasExplicitActivations = true;
+    const st = explicitActivationStacks.get(target) || [];
+    st.push(entry);
+    explicitActivationStacks.set(target, st);
+  };
+
+  const popExplicitActivationById = (target, callId) => {
+    const st = explicitActivationStacks.get(target);
+    if (!st || st.length === 0) return false;
+    for (let k = st.length - 1; k >= 0; k--) {
+      if (st[k].id === callId) {
+        st.splice(k, 1);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const popTopExplicitActivation = (target) => {
+    const st = explicitActivationStacks.get(target);
+    if (!st || st.length === 0) return null;
+    return st.pop();
+  };
 
   const recordDescendant = (node) => {
     for (let i = 0; i < callStack.length; i++) {
@@ -1352,23 +1425,65 @@ function finalizeUnifiedAST({
 
       if (node.type === 'divider' || node.type === 'note') {
         recordDescendant(node);
+        lastFlowNode = node;
+        lastReturnClosedTarget = null;
         continue;
       }
 
       if (node.type === 'highlight_band') {
         recordDescendant(node);
+        lastFlowNode = null;
+        lastReturnClosedTarget = null;
         walkNodes(node.children);
+        lastFlowNode = node;
+        lastReturnClosedTarget = null;
         continue;
       }
 
       if (node.type === 'activation_cmd') {
-        if (node.action === 'deactivate' || node.action === 'destroy') {
+        hasExplicitActivations = true;
+        if (node.action === 'activate') {
+          if (
+            lastFlowNode &&
+            lastFlowNode.type === 'message' &&
+            lastFlowNode.kind === 'call' &&
+            lastFlowNode.to === node.target &&
+            !lastFlowNode.activateTarget
+          ) {
+            lastFlowNode.activateTarget = true;
+            if (node.color && !lastFlowNode.activationColor) {
+              lastFlowNode.activationColor = node.color;
+            }
+            for (let s = callStack.length - 1; s >= 0; s--) {
+              if (callStack[s].callNode.id === lastFlowNode.id) {
+                callStack[s].hasExplicitActivation = true;
+                break;
+              }
+            }
+            node.mergedIntoCallId = lastFlowNode.id;
+            pushExplicitActivation(node.target, { kind: 'call', id: lastFlowNode.id });
+          } else {
+            pushExplicitActivation(node.target, { kind: 'cmd', id: node.id });
+          }
+          lastFlowNode = node;
+          lastReturnClosedTarget = null;
+        } else if (node.action === 'deactivate' || node.action === 'destroy') {
+          if (lastReturnClosedTarget === node.target) {
+            node.alreadyClosed = true;
+          } else {
+            const popped = popTopExplicitActivation(node.target);
+            if (popped && popped.kind === 'call') {
+              node.closedCallId = popped.id;
+            }
+          }
           for (let s = callStack.length - 1; s >= 0; s--) {
             if (callStack[s].callee === node.target) {
               popFramesDownTo(s, null);
               break;
             }
           }
+          lastFlowNode = node;
+          lastReturnClosedTarget = null;
         }
         continue;
       }
@@ -1412,7 +1527,11 @@ function finalizeUnifiedAST({
           callStack[s].callNode.subtreeNodeIds.push(node.id);
           callStack[s].callNode.descendantStepCount += 1;
         }
+        const popCallId = topFrame.callNode.id;
+        const closedExplicit = popExplicitActivationById(topFrame.callee, popCallId);
         popFramesDownTo(topIdx, node);
+        lastFlowNode = node;
+        lastReturnClosedTarget = closedExplicit ? topFrame.callee : null;
         continue;
       }
 
@@ -1423,11 +1542,15 @@ function finalizeUnifiedAST({
           if (callStack.length > entryStackDepth) {
             popFramesDownTo(entryStackDepth, null);
           }
+          lastFlowNode = null;
+          lastReturnClosedTarget = null;
           walkNodes(node.branches[b].children);
         }
         if (callStack.length > entryStackDepth) {
           popFramesDownTo(entryStackDepth, null);
         }
+        lastFlowNode = node;
+        lastReturnClosedTarget = null;
         continue;
       }
 
@@ -1450,6 +1573,7 @@ function finalizeUnifiedAST({
           node.kind = 'self';
           recordDescendant(node);
           if (node.activateTarget) {
+            pushExplicitActivation(node.to, { kind: 'call', id: node.id });
             callStack.push({
               callNode: node,
               caller: node.from,
@@ -1457,6 +1581,8 @@ function finalizeUnifiedAST({
               hasExplicitActivation: true,
             });
           } else if (node.deactivateSource) {
+            hasExplicitActivations = true;
+            popTopExplicitActivation(node.from);
             for (let s = callStack.length - 1; s >= 0; s--) {
               if (callStack[s].callee === node.from) {
                 popFramesDownTo(s, null);
@@ -1464,6 +1590,8 @@ function finalizeUnifiedAST({
               }
             }
           }
+          lastFlowNode = node;
+          lastReturnClosedTarget = null;
           continue;
         }
 
@@ -1483,11 +1611,16 @@ function finalizeUnifiedAST({
 
         if (matchingFrameIdx !== -1) {
           node.kind = 'return';
+          if (node.deactivateSource) hasExplicitActivations = true;
           for (let s = 0; s < matchingFrameIdx; s++) {
             callStack[s].callNode.subtreeNodeIds.push(node.id);
             callStack[s].callNode.descendantStepCount += 1;
           }
+          const matchedCallId = callStack[matchingFrameIdx].callNode.id;
+          const closedExplicit = popExplicitActivationById(node.from, matchedCallId);
           popFramesDownTo(matchingFrameIdx, node);
+          lastFlowNode = node;
+          lastReturnClosedTarget = closedExplicit ? node.from : null;
           continue;
         }
 
@@ -1498,6 +1631,12 @@ function finalizeUnifiedAST({
         if (isAsync) {
           node.kind = 'async';
           recordDescendant(node);
+          if (node.deactivateSource) {
+            hasExplicitActivations = true;
+            popTopExplicitActivation(node.from);
+          }
+          lastFlowNode = node;
+          lastReturnClosedTarget = null;
           continue;
         }
 
@@ -1519,12 +1658,17 @@ function finalizeUnifiedAST({
 
         node.kind = 'call';
         recordDescendant(node);
+        if (node.activateTarget) {
+          pushExplicitActivation(node.to, { kind: 'call', id: node.id });
+        }
         callStack.push({
           callNode: node,
           caller: node.from,
           callee: node.to,
           hasExplicitActivation: node.activateTarget,
         });
+        lastFlowNode = node;
+        lastReturnClosedTarget = null;
       }
     }
   }
@@ -1556,6 +1700,7 @@ function finalizeUnifiedAST({
     allNodesById,
     orderedSteps,
     warnings,
+    hasExplicitActivations,
     stats: {
       participantCount: participantsMap.size,
       boxCount: boxes.length,
@@ -1818,6 +1963,8 @@ function computeSequenceLayout({
       if (skippedByFoldedCall.has(n.id)) continue;
 
       if (n.type === 'activation_cmd') {
+        if (n.mergedIntoCallId || n.alreadyClosed) continue;
+        if (n.closedCallId && foldedCallIds.has(n.closedCallId)) continue;
         const targetCol = participantToColumnId.get(n.target) || n.target;
         if (n.action === 'activate') {
           startActivation(targetCol, dividerY, n.id, n.color || null, dividerId);
@@ -1849,6 +1996,11 @@ function computeSequenceLayout({
         const fromHidden = hiddenLifelines.has(fromColId);
         const toHidden = hiddenLifelines.has(toColId);
         const isFoldedCall = n.kind === 'call' && foldedCallIds.has(n.id);
+        const shouldActivateMsg =
+          n.activateTarget ||
+          (!ast.hasExplicitActivations &&
+            n.hasFoldableChildren &&
+            n.returnNodeId !== null);
 
         if (fromHidden && toHidden) continue;
         if (fromColId === toColId && fromColId.startsWith('group:') && n.from !== n.to) {
@@ -1856,7 +2008,7 @@ function computeSequenceLayout({
         }
 
         if (fromHidden !== toHidden) {
-          if (n.kind === 'call' && !isFoldedCall && fromHidden && !toHidden) {
+          if (n.kind === 'call' && !isFoldedCall && fromHidden && !toHidden && shouldActivateMsg) {
             startActivation(toColId, dividerY, n.id, n.activationColor || null, dividerId);
           } else if (n.kind === 'return' && n.pairedCallId) {
             endActivation(fromColId, dividerY, n.pairedCallId, dividerId);
@@ -1867,13 +2019,17 @@ function computeSequenceLayout({
         if (isFoldedCall) continue;
 
         if (fromColId === toColId) {
-          if (n.kind === 'return' && n.pairedCallId) {
+          if (n.kind === 'self' && n.activateTarget) {
+            startActivation(toColId, dividerY, n.id, n.activationColor || null, dividerId);
+          } else if (n.kind === 'self' && n.deactivateSource) {
+            endActivation(toColId, dividerY, null, dividerId);
+          } else if (n.kind === 'return' && n.pairedCallId) {
             endActivation(toColId, dividerY, n.pairedCallId, dividerId);
           }
           continue;
         }
 
-        if (n.kind === 'call' && (n.hasFoldableChildren || n.activateTarget)) {
+        if (n.kind === 'call' && shouldActivateMsg) {
           startActivation(toColId, dividerY, n.id, n.activationColor || null, dividerId);
         } else if (n.kind === 'return' && n.pairedCallId) {
           endActivation(fromColId, dividerY, n.pairedCallId, dividerId);
@@ -1883,6 +2039,7 @@ function computeSequenceLayout({
   };
 
   let cursorY = LAYOUT.TOP_START;
+  let lastAnchorY = null;
   let pendingHiddenCluster = null;
   let pendingGroupInternalCluster = null;
 
@@ -1902,6 +2059,7 @@ function computeSequenceLayout({
       messages: items,
     });
     cursorY = startY + LAYOUT.ROW_COALESCED_HIDDEN;
+    lastAnchorY = null;
     pendingHiddenCluster = null;
   };
 
@@ -1922,6 +2080,7 @@ function computeSequenceLayout({
       messages: items,
     });
     cursorY = startY + 42;
+    lastAnchorY = null;
     pendingGroupInternalCluster = null;
   };
 
@@ -1932,11 +2091,14 @@ function computeSequenceLayout({
       if (skippedByFoldedCall.has(node.id)) continue;
 
       if (node.type === 'activation_cmd') {
+        if (node.mergedIntoCallId || node.alreadyClosed) continue;
+        if (node.closedCallId && foldedCallIds.has(node.closedCallId)) continue;
         const targetCol = participantToColumnId.get(node.target) || node.target;
+        const anchorY = lastAnchorY !== null ? lastAnchorY : cursorY;
         if (node.action === 'activate') {
-          startActivation(targetCol, cursorY, node.id, node.color || null);
+          startActivation(targetCol, anchorY, node.id, node.color || null);
         } else {
-          endActivation(targetCol, cursorY);
+          endActivation(targetCol, anchorY);
         }
         continue;
       }
@@ -1962,6 +2124,7 @@ function computeSequenceLayout({
           stepCount,
         });
         cursorY += LAYOUT.ROW_DIVIDER;
+        lastAnchorY = null;
         if (isCollapsed) {
           processCollapsedDividerActivations(sectionNodes, node.id, y);
           i = nextDividerIdx - 1;
@@ -1991,6 +2154,7 @@ function computeSequenceLayout({
           lines: node.lines,
         });
         cursorY += LAYOUT.ROW_NOTE + Math.max(0, node.lines.length - 1) * 15;
+        lastAnchorY = null;
         continue;
       }
 
@@ -2015,11 +2179,13 @@ function computeSequenceLayout({
             : canvasWidth - 32 - inset;
 
         cursorY = bandTopY + 8;
+        lastAnchorY = null;
         layoutNodes(node.children, nestingDepth);
         flushHiddenCluster();
         flushGroupInternalCluster();
         const bandBottomY = cursorY + 8;
         cursorY = bandBottomY + 6;
+        lastAnchorY = null;
 
         renderItems.push({
           type: 'highlight_band',
@@ -2082,12 +2248,15 @@ function computeSequenceLayout({
 
           if (isBranchFolded) {
             cursorY += b === 0 ? 28 : 26;
+            lastAnchorY = null;
           } else {
             cursorY += (b === 0 ? LAYOUT.FRAG_HEADER_H : LAYOUT.FRAG_ELSE_H) + 8;
+            lastAnchorY = null;
             layoutNodes(branch.children, nestingDepth + 1);
             flushHiddenCluster();
             flushGroupInternalCluster();
             cursorY += 6;
+            lastAnchorY = null;
           }
         }
 
@@ -2095,6 +2264,7 @@ function computeSequenceLayout({
         const isLastBranchFolded = lastBranch ? foldedBranchIds.has(lastBranch.id) : false;
         const fragBottomY = cursorY + (isLastBranchFolded ? 2 : LAYOUT.FRAG_BOTTOM_PAD);
         cursorY = fragBottomY + 8;
+        lastAnchorY = null;
 
         renderItems.push({
           type: 'fragment',
@@ -2206,13 +2376,24 @@ function computeSequenceLayout({
             isFoldedCall,
           });
 
-          if (node.kind === 'call' && !isFoldedCall && fromHidden && !toHidden) {
+          const shouldActivateStub =
+            node.kind === 'call' &&
+            !isFoldedCall &&
+            fromHidden &&
+            !toHidden &&
+            (node.activateTarget ||
+              (!ast.hasExplicitActivations &&
+                node.hasFoldableChildren &&
+                node.returnNodeId !== null));
+
+          if (shouldActivateStub) {
             startActivation(toColId, y, node.id, node.activationColor || null);
           } else if (node.kind === 'return' && node.pairedCallId) {
             endActivation(fromColId, y, node.pairedCallId);
           }
 
           cursorY += LAYOUT.ROW_HIDDEN_STUB;
+          lastAnchorY = y;
           continue;
         }
 
@@ -2231,6 +2412,7 @@ function computeSequenceLayout({
             toX,
           });
           cursorY += LAYOUT.ROW_FOLDED_CALL;
+          lastAnchorY = y;
           continue;
         }
 
@@ -2246,10 +2428,15 @@ function computeSequenceLayout({
             x: fromX,
             colId: fromColId,
           });
-          if (node.kind === 'return' && node.pairedCallId) {
+          if (node.kind === 'self' && node.activateTarget) {
+            startActivation(toColId, y, node.id, node.activationColor || null);
+          } else if (node.kind === 'self' && node.deactivateSource) {
+            endActivation(toColId, y + 14, null);
+          } else if (node.kind === 'return' && node.pairedCallId) {
             endActivation(toColId, y, node.pairedCallId);
           }
           cursorY += LAYOUT.ROW_SELF_MESSAGE + extraH;
+          lastAnchorY = y + 14;
           continue;
         }
 
@@ -2268,13 +2455,21 @@ function computeSequenceLayout({
           toColId,
         });
 
-        if (node.kind === 'call' && (node.hasFoldableChildren || node.activateTarget)) {
+        const shouldActivateMsg =
+          node.kind === 'call' &&
+          (node.activateTarget ||
+            (!ast.hasExplicitActivations &&
+              node.hasFoldableChildren &&
+              node.returnNodeId !== null));
+
+        if (shouldActivateMsg) {
           startActivation(toColId, y, node.id, node.activationColor || null);
         } else if (node.kind === 'return' && node.pairedCallId) {
           endActivation(fromColId, y, node.pairedCallId);
         }
 
         cursorY += LAYOUT.ROW_MESSAGE + extraH;
+        lastAnchorY = y;
       }
     }
   }
@@ -4690,7 +4885,8 @@ export default function App() {
                       if (item.type === 'hidden_stub') {
                         const dirSymbol = item.direction === 'outgoing' ? '→' : '←';
                         const flatMsgLabel = flattenUmlLabel(item.node.label) || 'msg';
-                        const rawText = `${dirSymbol} [${flattenUmlLabel(item.hiddenLabel)}] ${flatMsgLabel}`;
+                        const numPrefix = getAutoNumberPrefix(item.node);
+                        const rawText = `${dirSymbol} [${flattenUmlLabel(item.hiddenLabel)}] ${numPrefix}${flatMsgLabel}`;
                         const displayText = rawText.length > 34 ? `${rawText.slice(0, 33)}…` : rawText;
                         const pillW = Math.min(230, Math.max(110, displayText.length * 6.3 + 22));
                         const stubLineLen = 14;
@@ -4767,11 +4963,12 @@ export default function App() {
                         if (hiddenFrags > 0) metaParts.push(`${hiddenFrags} block`);
                         const metaBadge = metaParts.length > 0 ? ` [${metaParts.join(', ')}]` : '';
                         const flatCallLabel = flattenUmlLabel(item.node.label) || 'call()';
+                        const numPrefix = getAutoNumberPrefix(item.node);
                         const returnSuffix = item.node.returnLabel
                           ? `  ↩ ${flattenUmlLabel(item.node.returnLabel)}`
                           : '';
 
-                        const fullLabel = `▸ ${flatCallLabel}${metaBadge}${returnSuffix}`;
+                        const fullLabel = `▸ ${numPrefix}${flatCallLabel}${metaBadge}${returnSuffix}`;
                         const maxChars = Math.max(18, Math.floor((spanW - 18) / 6.3));
                         const clipped =
                           fullLabel.length > maxChars ? `${fullLabel.slice(0, maxChars - 1)}…` : fullLabel;
@@ -4820,10 +5017,14 @@ export default function App() {
                         const loopW = 42;
                         const loopH = 22;
                         const edgeX = getColumnEdgeX(colId, x, y, 'right');
+                        const numPrefix = getAutoNumberPrefix(node);
                         const labelText = node.label || 'self()';
                         const selfLines = splitUmlLines(labelText);
                         const displaySelfLines = (selfLines.length > 0 ? selfLines : ['self()']).map(
-                          (ln) => (ln.length > 26 ? `${ln.slice(0, 25)}…` : ln)
+                          (ln, idx) => {
+                            const prefixed = idx === 0 ? `${numPrefix}${ln}` : ln;
+                            return prefixed.length > 28 ? `${prefixed.slice(0, 27)}…` : prefixed;
+                          }
                         );
                         const selfLineH = 14;
                         const textStartY = y + 6 - Math.floor(((displaySelfLines.length - 1) * selfLineH) / 2);
@@ -4920,7 +5121,7 @@ export default function App() {
 
                         const midX = (x1 + x2) / 2;
                         const spanDist = Math.abs(x2 - x1);
-                        const numPrefix = node.autoNumber !== null ? `${node.autoNumber}. ` : '';
+                        const numPrefix = getAutoNumberPrefix(node);
                         const foldPrefix = canFold ? '▾ ' : '';
                         const baseText = node.label || (isReturn ? 'return' : '');
                         const parsedLines = splitUmlLines(baseText);
